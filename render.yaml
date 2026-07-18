@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: yigdesk-build-week
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit

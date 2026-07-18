@@ -1,0 +1,31 @@
+{
+  "ready": {
+    "label": "Complete evidence",
+    "requester": "Elena Rossi",
+    "requester_role": "Account Executive",
+    "recipient": "Marie Laurent · CFO",
+    "subject": "Northstar renewal — approval for 12%",
+    "sent_at": "Today, 09:14",
+    "message": "Northstar is ready to sign the two-year renewal today if we can move from 10% to 12%. Please confirm the revenue and margin impact before I reply.",
+    "list_arr_k": "1000",
+    "current_discount_pct": "10",
+    "requested_discount_pct": "12",
+    "cogs_k": "480",
+    "margin_floor_pct": "40"
+  },
+  "hold": {
+    "label": "Incomplete evidence",
+    "requester": "Elena Rossi",
+    "requester_role": "Account Executive",
+    "recipient": "Marie Laurent · CFO",
+    "subject": "Northstar renewal — approval for 12%",
+    "sent_at": "Today, 09:14",
+    "message": "Northstar is ready to sign the two-year renewal today if we can move from 10% to 12%. Please confirm the revenue and margin impact before I reply.",
+    "list_arr_k": "1000",
+    "current_discount_pct": "10",
+    "requested_discount_pct": "12",
+    "cogs_k": null,
+    "margin_floor_pct": "40"
+  }
+}
+

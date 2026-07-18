@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yigdesk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: pytest
+
+  browser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - run: pip install -r requirements.txt
+      - run: npm ci --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e -- --reporter=line
+
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t yigdesk-build-week .

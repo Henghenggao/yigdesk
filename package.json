@@ -1,0 +1,14 @@
+{
+  "name": "yigdesk-build-week",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "pytest",
+    "test:boundary": "pytest tests/test_boundary.py -q",
+    "test:e2e": "playwright test",
+    "capture": "node scripts/capture.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}

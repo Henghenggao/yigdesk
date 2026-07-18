@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#153b34" />
+    <title>Yigdesk — consequence preview for office agents</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div class="paper-grid" aria-hidden="true"></div>
+    <header class="masthead">
+      <a class="brand" href="/" aria-label="Yigdesk home">
+        <span class="brand-mark" aria-hidden="true"><i>Y</i><i>D</i></span>
+        <span><strong>Yigdesk</strong><small>Evidence before action</small></span>
+      </a>
+      <div class="topline">
+        <span class="live-dot" aria-hidden="true"></span>
+        Public demo · synthetic data
+        <span class="hairline" aria-hidden="true"></span>
+        No business write-back capability
+      </div>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">Work &amp; Productivity · Codex change preflight</p>
+          <h1 id="page-title">See the consequence<br />before the agent acts.</h1>
+        </div>
+        <p class="hero-copy">
+          A forwarded discount request becomes a workbook-backed preview. Codex reads;
+          a small deterministic demo adapter calculates; Yigdesk exposes every bound cell.
+        </p>
+      </section>
+
+      <section class="scenario-bar" aria-label="Demo scenario">
+        <div>
+          <span class="section-index">00</span>
+          <span class="scenario-label">Choose evidence state</span>
+        </div>
+        <div class="scenario-switch" role="group" aria-label="Evidence scenario">
+          <button type="button" data-scenario="ready" class="scenario-button is-active">
+            <span class="button-signal complete"></span>Complete evidence
+          </button>
+          <button type="button" data-scenario="hold" class="scenario-button">
+            <span class="button-signal incomplete"></span>Missing cost evidence
+          </button>
+        </div>
+      </section>
+
+      <ol class="process-strip" aria-label="Preview process">
+        <li class="is-current" data-step="read"><span>01</span>Read</li>
+        <li data-step="calculate"><span>02</span>Calculate</li>
+        <li data-step="trace"><span>03</span>Trace</li>
+        <li data-step="review"><span>04</span>Review</li>
+      </ol>
+
+      <section class="workspace">
+        <article class="inbox-panel panel" aria-labelledby="inbox-heading">
+          <header class="panel-heading">
+            <div><span class="section-index">01</span><h2 id="inbox-heading">Forwarded request</h2></div>
+            <span class="source-pill">SYNTHETIC</span>
+          </header>
+          <div class="email-header">
+            <div class="avatar" aria-hidden="true">ER</div>
+            <div>
+              <strong id="requester">Elena Rossi</strong>
+              <span id="requester-role">Account Executive</span>
+            </div>
+            <time id="sent-at">Today, 09:14</time>
+          </div>
+          <p class="email-to">To: <strong id="recipient">Marie Laurent · CFO</strong></p>
+          <h3 id="subject">Northstar renewal — review 12% request</h3>
+          <p class="email-body" id="message"></p>
+          <div class="attachment">
+            <span class="sheet-icon" aria-hidden="true">X</span>
+            <span><strong>Northstar-renewal.xlsx</strong><small>2 sheets · generated synthetic fixture</small></span>
+            <span class="attachment-state">read only</span>
+          </div>
+          <button type="button" class="primary-action" id="analyze" data-testid="analyze">
+            <span>Analyze with Codex</span><span aria-hidden="true">↗</span>
+          </button>
+          <p class="read-wall"><span aria-hidden="true">◉</span> The public build can preview, never alter the source</p>
+        </article>
+
+        <article class="decision-panel panel" aria-labelledby="decision-heading">
+          <header class="panel-heading">
+            <div><span class="section-index">02</span><h2 id="decision-heading">Consequence proof</h2></div>
+            <span class="verdict idle" id="verdict" data-testid="verdict">NOT ANALYZED</span>
+          </header>
+
+          <div class="decision-empty" id="decision-empty">
+            <div class="proof-seal" aria-hidden="true"><span>5</span><small>cells</small></div>
+            <h3>Nothing inferred yet.</h3>
+            <p>Run a read-only preview to bind every displayed figure to one source packet.</p>
+          </div>
+
+          <div class="decision-content" id="decision-content" hidden>
+            <p class="decision-reason" id="decision-reason"></p>
+            <div class="metrics">
+              <div class="metric metric-primary"><span>Net ARR</span><strong id="net-arr">—</strong><small>at requested discount</small></div>
+              <div class="metric"><span>ARR impact</span><strong id="arr-impact">—</strong><small>vs. current terms</small></div>
+              <div class="metric"><span>Gross margin</span><strong id="gross-margin">—</strong><small id="headroom">—</small></div>
+            </div>
+            <div class="evidence-header">
+              <span>Bound engine evidence</span>
+              <span id="byte-proof">Workbook bytes unchanged</span>
+            </div>
+            <ul class="evidence-list" id="evidence-list"></ul>
+            <div class="review-wall">
+              <div>
+                <span class="actor-avatar" aria-hidden="true">ML</span>
+                <span><strong>Marie Laurent</strong><small>Chief Financial Officer</small></span>
+              </div>
+              <span class="scope-chip">Review packet only</span>
+            </div>
+          </div>
+        </article>
+
+        <aside class="ledger-panel panel" aria-labelledby="ledger-heading">
+          <header class="panel-heading">
+            <div><span class="section-index">03</span><h2 id="ledger-heading">Model evidence</h2></div>
+            <span class="disk-state" id="packet-status">PREVIEW ONLY</span>
+          </header>
+          <div class="workbook-title">
+            <span class="sheet-icon" aria-hidden="true">X</span>
+            <span><strong>Northstar renewal</strong><small id="fingerprint">sha256 · loading</small></span>
+          </div>
+          <yig-grid id="workbook-grid" aria-label="Read-only workbook view"></yig-grid>
+          <section class="inspector-section" aria-labelledby="inspector-heading">
+            <h3 id="inspector-heading">Selected object <span>&lt;yig-model-inspector&gt;</span></h3>
+            <yig-model-inspector id="model-inspector"></yig-model-inspector>
+          </section>
+        </aside>
+      </section>
+
+      <section class="packet-export" id="packet-export" aria-live="polite" hidden>
+        <div class="packet-mark" aria-hidden="true">✓</div>
+        <div>
+          <p class="eyebrow">Portable proof ready</p>
+          <h2>ConsequencePacket prepared.</h2>
+          <p><code id="packet-id">cpkt-pending</code> · <span id="packet-scope">synthetic adapter</span></p>
+          <button type="button" id="copy-packet">Copy proof packet</button>
+        </div>
+        <div class="reply-card">
+          <span id="memo-status">DRAFT · NOT SENT</span>
+          <p id="memo-body"></p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Yigdesk / Build Week 2026</span>
+      <span>Open preview surface · proprietary Yigrid kernel not included</span>
+    </footer>
+  </body>
+</html>
