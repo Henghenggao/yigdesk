@@ -3,23 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Yigdesk previews workbook-backed consequences and exposes the exact evidence before an office agent acts."
+    />
     <meta name="theme-color" content="#153b34" />
     <title>Yigdesk — consequence preview for office agents</title>
     <link rel="stylesheet" href="/styles.css" />
     <script type="module" src="/app.js"></script>
   </head>
   <body>
+    <a class="skip-link" href="#workspace">Skip to consequence workspace</a>
     <div class="paper-grid" aria-hidden="true"></div>
     <header class="masthead">
       <a class="brand" href="/" aria-label="Yigdesk home">
         <span class="brand-mark" aria-hidden="true"><i>Y</i><i>D</i></span>
-        <span><strong>Yigdesk</strong><small>Evidence before action</small></span>
+        <span class="brand-copy"><strong>Yigdesk</strong><small>Evidence before action</small></span>
       </a>
       <div class="topline">
-        <span class="live-dot" aria-hidden="true"></span>
-        Public demo · synthetic data
+        <span class="topline-item"><span class="live-dot" aria-hidden="true"></span>Public demo</span>
+        <span class="topline-item">Synthetic data</span>
         <span class="hairline" aria-hidden="true"></span>
-        No business write-back capability
+        <span class="topline-item">No business write-back</span>
       </div>
     </header>
 
@@ -29,10 +34,17 @@
           <p class="eyebrow">Work &amp; Productivity · Codex change preflight</p>
           <h1 id="page-title">See the consequence<br />before the agent acts.</h1>
         </div>
-        <p class="hero-copy">
-          A forwarded discount request becomes a workbook-backed preview. Codex reads;
-          a small deterministic demo adapter calculates; Yigdesk exposes every bound cell.
-        </p>
+        <div class="hero-aside">
+          <p class="hero-copy">
+            A forwarded discount request becomes a workbook-backed preview. Codex reads;
+            a small deterministic demo adapter calculates; Yigdesk exposes every bound cell.
+          </p>
+          <div class="hero-proof" aria-label="Public demo posture">
+            <span>Proof posture</span>
+            <strong>Read-only analysis</strong>
+            <small>Exact source objects · honest refusal</small>
+          </div>
+        </div>
       </section>
 
       <section class="scenario-bar" aria-label="Demo scenario">
@@ -42,22 +54,24 @@
         </div>
         <div class="scenario-switch" role="group" aria-label="Evidence scenario">
           <button type="button" data-scenario="ready" class="scenario-button is-active">
-            <span class="button-signal complete"></span>Complete evidence
+            <span class="button-signal complete" aria-hidden="true"></span>
+            <span><strong>Complete evidence</strong><small>Decision can be proven</small></span>
           </button>
           <button type="button" data-scenario="hold" class="scenario-button">
-            <span class="button-signal incomplete"></span>Missing cost evidence
+            <span class="button-signal incomplete" aria-hidden="true"></span>
+            <span><strong>Missing cost evidence</strong><small>Refusal path</small></span>
           </button>
         </div>
       </section>
 
       <ol class="process-strip" aria-label="Preview process">
-        <li class="is-current" data-step="read"><span>01</span>Read</li>
-        <li data-step="calculate"><span>02</span>Calculate</li>
-        <li data-step="trace"><span>03</span>Trace</li>
-        <li data-step="review"><span>04</span>Review</li>
+        <li class="is-current" data-step="read"><span class="step-number">01</span><span class="step-label">Read<small>source</small></span></li>
+        <li data-step="calculate"><span class="step-number">02</span><span class="step-label">Calculate<small>preview</small></span></li>
+        <li data-step="trace"><span class="step-number">03</span><span class="step-label">Trace<small>evidence</small></span></li>
+        <li data-step="review"><span class="step-number">04</span><span class="step-label">Review<small>packet</small></span></li>
       </ol>
 
-      <section class="workspace">
+      <section class="workspace" id="workspace" aria-label="Consequence workspace">
         <article class="inbox-panel panel" aria-labelledby="inbox-heading">
           <header class="panel-heading">
             <div><span class="section-index">01</span><h2 id="inbox-heading">Forwarded request</h2></div>
@@ -79,16 +93,17 @@
             <span><strong>Northstar-renewal.xlsx</strong><small>2 sheets · generated synthetic fixture</small></span>
             <span class="attachment-state">read only</span>
           </div>
-          <button type="button" class="primary-action" id="analyze" data-testid="analyze">
-            <span>Analyze with Codex</span><span aria-hidden="true">↗</span>
+          <button type="button" class="primary-action" id="analyze" data-testid="analyze" aria-describedby="read-wall">
+            <span class="action-label">Analyze with Codex</span>
+            <span class="action-icon" aria-hidden="true"><span class="icon-arrow">↗</span><span class="icon-loading"></span></span>
           </button>
-          <p class="read-wall"><span aria-hidden="true">◉</span> The public build can preview, never alter the source</p>
+          <p class="read-wall" id="read-wall"><span aria-hidden="true">◉</span> Analysis can preview, never alter the source</p>
         </article>
 
         <article class="decision-panel panel" aria-labelledby="decision-heading">
           <header class="panel-heading">
             <div><span class="section-index">02</span><h2 id="decision-heading">Consequence proof</h2></div>
-            <span class="verdict idle" id="verdict" data-testid="verdict">NOT ANALYZED</span>
+            <span class="verdict idle" id="verdict" data-testid="verdict" role="status" aria-live="polite">NOT ANALYZED</span>
           </header>
 
           <div class="decision-empty" id="decision-empty">
@@ -136,13 +151,13 @@
         </aside>
       </section>
 
-      <section class="packet-export" id="packet-export" aria-live="polite" hidden>
-        <div class="packet-mark" aria-hidden="true">✓</div>
+      <section class="packet-export" id="packet-export" role="status" aria-live="polite" hidden>
+        <div class="packet-mark" id="packet-mark" aria-hidden="true">✓</div>
         <div>
-          <p class="eyebrow">Portable proof ready</p>
-          <h2>ConsequencePacket prepared.</h2>
+          <p class="eyebrow" id="packet-eyebrow">Portable proof ready</p>
+          <h2 id="packet-heading">ConsequencePacket prepared.</h2>
           <p><code id="packet-id">cpkt-pending</code> · <span id="packet-scope">synthetic adapter</span></p>
-          <button type="button" id="copy-packet">Copy proof packet</button>
+          <button type="button" id="copy-packet"><span>Copy proof packet</span><span aria-hidden="true">↗</span></button>
         </div>
         <div class="reply-card">
           <span id="memo-status">DRAFT · NOT SENT</span>

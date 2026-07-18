@@ -86,3 +86,21 @@ def test_legacy_brand_and_personal_machine_markers_are_absent():
     ]
     hits = [str(path.relative_to(ROOT)) for path in files if forbidden.search(_text(path))]
     assert not hits, f"Legacy brand or personal machine marker found: {hits}"
+
+
+def test_visual_system_uses_named_tokens_and_specific_transitions():
+    css = _text(ROOT / "yigdesk" / "static" / "styles.css")
+    for token in (
+        "--font-display",
+        "--font-sans",
+        "--font-mono",
+        "--canvas",
+        "--surface-raised",
+        "--forest",
+        "--evidence",
+        "--hold",
+    ):
+        assert token in css
+    assert "transition: all" not in css
+    assert "font-variant-numeric: tabular-nums" in css
+    assert "prefers-reduced-motion" in css

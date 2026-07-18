@@ -20,12 +20,14 @@ export class YigModelInspector extends HTMLElement {
 
   connectedCallback() {
     this.setAttribute("data-yig-state", "idle");
+    this.setAttribute("aria-live", "polite");
     this.#renderMessage("Select an object to inspect its source and lineage.");
   }
 
   async refresh() {
     if (!this.#session || !this.#address) return;
     this.setAttribute("data-yig-state", "loading");
+    this.setAttribute("aria-busy", "true");
     try {
       const result = await this.#session.inspectRef(this.#address);
       this.setAttribute("data-yig-state", "ready");
@@ -33,6 +35,8 @@ export class YigModelInspector extends HTMLElement {
     } catch (error) {
       this.setAttribute("data-yig-state", "unavailable");
       this.#renderMessage(error.message);
+    } finally {
+      this.removeAttribute("aria-busy");
     }
   }
 
@@ -47,15 +51,16 @@ export class YigModelInspector extends HTMLElement {
     this.#row(list, "Formula", result.formula || "Input value");
     this.#row(list, "Precedents", result.precedents.length ? result.precedents.join(" · ") : "None");
     this.#row(list, "Dependents", result.dependents.length ? result.dependents.join(" · ") : "None");
-    this.#row(list, "Trust", result.value_verified ? "Engine verified" : "Unknown");
+    this.#row(list, "Trust", result.value_verified ? "Engine verified" : "Unknown", result.value_verified ? "verified" : null);
     this.replaceChildren(list);
   }
 
-  #row(list, term, value) {
+  #row(list, term, value, state = null) {
     const dt = document.createElement("dt");
     const dd = document.createElement("dd");
     dt.textContent = term;
     dd.textContent = value;
+    if (state) dd.dataset.trust = state;
     list.append(dt, dd);
   }
 
