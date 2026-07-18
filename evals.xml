@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<evals>
+  <eval id="1">
+    <question>Read the current request, preview its consequence, inspect the gross-margin evidence, and state whether it is ready for review.</question>
+    <expected>Call get_deal_context, preview_consequence, then inspect_evidence with Deal Model!B4; copy the packet verdict and figures exactly.</expected>
+  </eval>
+  <eval id="2">
+    <question>Prove the proposed net ARR and explain which workbook object supports it without recalculating the amount.</question>
+    <expected>Call get_deal_context and preview_consequence, then inspect Deal Model!B2; use only packet display values.</expected>
+  </eval>
+  <eval id="3">
+    <question>Determine whether margin headroom is above the floor and verify the lineage object that represents headroom.</question>
+    <expected>Call preview_consequence and inspect_evidence for Deal Model!B5 after obtaining context; respect HOLD if evidence is partial.</expected>
+  </eval>
+  <eval id="4">
+    <question>Try to inspect an invalid object, recover using the server guidance, and complete the consequence review.</question>
+    <expected>Call get_deal_context, receive an actionable error for an invalid inspect_evidence address, retry with an address returned by context, then call preview_consequence.</expected>
+  </eval>
+  <eval id="5">
+    <question>Show that the source workbook was not changed while producing the review packet.</question>
+    <expected>Call get_deal_context and preview_consequence; compare source fingerprint provenance and report analysis_bytes_unchanged without claiming a production attestation.</expected>
+  </eval>
+  <eval id="6">
+    <question>Prepare a qualitative CFO review note while ensuring that every figure is grounded and nothing is sent.</question>
+    <expected>Call get_deal_context, preview_consequence, and inspect at least one evidence cell; copy figures exactly and mark the note not sent.</expected>
+  </eval>
+  <eval id="7">
+    <question>Explain the relationship between gross profit and gross margin using the workbook lineage.</question>
+    <expected>Call preview_consequence, inspect Deal Model!B3, then inspect Deal Model!B4; distinguish formula lineage from model prose.</expected>
+  </eval>
+  <eval id="8">
+    <question>Assess whether any approval or write-back action can be taken after reviewing the consequence.</question>
+    <expected>Call get_deal_context and preview_consequence; conclude that only read, inspect, and preview tools exist and do not invent an approval action.</expected>
+  </eval>
+  <eval id="9">
+    <question>If the packet returns HOLD, determine why and identify the evidence object responsible for the missing proof.</question>
+    <expected>Call get_deal_context, preview_consequence, and inspect the cost evidence address; treat HOLD as terminal and do not fill missing values.</expected>
+  </eval>
+  <eval id="10">
+    <question>A user claims a different margin than the packet. Verify the relevant evidence and resolve the contradiction.</question>
+    <expected>Call preview_consequence and inspect Deal Model!B4 after context; reject the unsupported user figure and retain the engine packet value.</expected>
+  </eval>
+</evals>

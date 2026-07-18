@@ -3,8 +3,9 @@ import "/yig-grid.js";
 import "/yig-model-inspector.js";
 
 const session = new YigdeskSession();
-const state = { packet: null };
+const state = { packet: null, agent: null, agentRun: null, copyResetTimer: null };
 const byId = (id) => document.getElementById(id);
+const delay = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 async function demoApi(path, payload) {
   const response = await fetch(path, {
@@ -43,26 +44,104 @@ function renderStory(payload) {
     button.setAttribute("aria-pressed", String(isActive));
   });
   byId("fingerprint").textContent = `sha256 · ${payload.workbook.fingerprint.slice(0, 12)}`;
+  configureAgent(payload.agent);
 }
 
-function clearPreview() {
+function configureAgent(agent) {
+  state.agent = agent || { available: false, mode: "local-preview", model: null };
+  const label = byId("analyze").querySelector(".action-label");
+  if (state.agent.available) {
+    label.textContent = "Analyze with Codex";
+    byId("read-wall").innerHTML = '<span aria-hidden="true">&#9673;</span> Codex is tool-limited; analysis can never alter the source';
+  } else {
+    label.textContent = "Preview consequence locally";
+    byId("read-wall").innerHTML = '<span aria-hidden="true">&#9673;</span> Codex runtime is not configured · local deterministic preview';
+  }
+}
+
+function revokeProof() {
   state.packet = null;
-  document.body.dataset.outcome = "idle";
+  state.agentRun = null;
   byId("decision-empty").hidden = false;
   byId("decision-content").hidden = true;
   byId("packet-export").hidden = true;
+  byId("decision-reason").textContent = "";
+  byId("net-arr").textContent = "—";
+  byId("arr-impact").textContent = "—";
+  byId("gross-margin").textContent = "—";
+  byId("headroom").textContent = "—";
+  byId("byte-proof").textContent = "No proof packet";
+  byId("evidence-list").replaceChildren();
+  byId("workbook-grid").packet = null;
+  byId("model-inspector").packet = null;
+  byId("agent-proof").hidden = true;
+  byId("agent-mode").textContent = "Codex + Yigdesk MCP";
+  byId("agent-meta").textContent = "run pending";
+  byId("agent-verified").textContent = "NOT VERIFIED";
+  byId("packet-id").textContent = "cpkt-pending";
+  byId("packet-scope").textContent = "synthetic adapter";
+  byId("packet-mark").textContent = "✓";
+  byId("packet-eyebrow").textContent = "Portable proof ready";
+  byId("packet-heading").textContent = "ConsequencePacket prepared.";
+  byId("memo-status").textContent = "NOT PREPARED";
+  byId("memo-body").textContent = "";
+  const copyButton = byId("copy-packet");
+  if (state.copyResetTimer !== null) {
+    window.clearTimeout(state.copyResetTimer);
+    state.copyResetTimer = null;
+  }
+  copyButton.disabled = true;
+  copyButton.firstElementChild.textContent = "Copy proof packet";
+  copyButton.dataset.state = "idle";
+}
+
+function setEmptyDecision(heading, message) {
+  byId("decision-empty-heading").textContent = heading;
+  byId("decision-empty-message").textContent = message;
+}
+
+function clearPreview() {
+  revokeProof();
+  document.body.dataset.outcome = "idle";
   byId("verdict").className = "verdict idle";
   byId("verdict").textContent = "NOT ANALYZED";
   byId("packet-status").textContent = "PREVIEW ONLY";
-  byId("workbook-grid").packet = null;
-  byId("model-inspector").packet = null;
-  byId("copy-packet").firstElementChild.textContent = "Copy proof packet";
-  byId("copy-packet").dataset.state = "idle";
+  setEmptyDecision(
+    "Nothing inferred yet.",
+    "Run a read-only preview to bind all five output cells to one source packet.",
+  );
   setStep("read");
 }
 
-function renderPacket(packet) {
+function showAnalysisPending() {
+  revokeProof();
+  document.body.dataset.outcome = "analyzing";
+  byId("verdict").className = "verdict idle";
+  byId("verdict").textContent = "ANALYZING";
+  byId("packet-status").textContent = "VERIFYING";
+  setEmptyDecision(
+    "Building a fresh proof…",
+    "The previous result has been revoked while the engine verifies this run.",
+  );
+  setStep("calculate");
+}
+
+function showAnalysisError(isAgent) {
+  revokeProof();
+  document.body.dataset.outcome = "error";
+  byId("verdict").className = "verdict error";
+  byId("verdict").textContent = isAgent ? "AGENT REJECTED" : "PREVIEW ERROR";
+  byId("packet-status").textContent = "NO VERIFIED PACKET";
+  setEmptyDecision(
+    "Analysis could not be verified.",
+    "No proof packet is available. Retry to produce a fresh, engine-matched result.",
+  );
+  setStep("trace");
+}
+
+function renderPacket(packet, agentRun = null) {
   state.packet = packet;
+  state.agentRun = agentRun;
   const consequence = packet.consequence;
   document.body.dataset.outcome = consequence.complete ? "ready" : "hold";
   byId("decision-empty").hidden = true;
@@ -97,17 +176,46 @@ function renderPacket(packet) {
 
   byId("workbook-grid").packet = packet;
   byId("model-inspector").packet = packet;
+  if (agentRun?.agent) {
+    const trace = agentRun.agent;
+    const usage = trace.usage || {};
+    const tokens = (usage.input_tokens || 0) + (usage.output_tokens || 0);
+    byId("agent-mode").textContent = `Codex + Yigdesk MCP · ${trace.model}`;
+    byId("agent-meta").textContent = `${agentRun.run_id} · ${trace.tool_calls.length} tools · ${trace.latency_ms} ms · ${tokens} tokens`;
+    byId("agent-verified").textContent = "ENGINE MATCH VERIFIED";
+    byId("agent-proof").hidden = false;
+  } else {
+    byId("agent-proof").hidden = true;
+  }
   byId("packet-id").textContent = packet.packet_id;
   byId("packet-scope").textContent = packet.implementation_scope;
   byId("packet-mark").textContent = consequence.complete ? "✓" : "!";
   byId("packet-eyebrow").textContent = consequence.complete ? "Portable proof ready" : "Refusal proof ready";
   byId("packet-heading").textContent = consequence.complete ? "ConsequencePacket prepared." : "Hold packet prepared.";
   byId("packet-export").hidden = false;
+  byId("copy-packet").disabled = false;
   byId("memo-status").textContent = consequence.complete ? "DRAFT · NOT SENT" : "NOT PREPARED";
   byId("memo-body").textContent = consequence.complete
     ? `Requested terms preview at ${consequence.display.net_arr}, ${consequence.display.gross_margin} gross margin, ${consequence.display.headroom} above the floor.`
     : "The memo is withheld because cost evidence is incomplete.";
   setStep(consequence.complete ? "review" : "trace");
+}
+
+async function runWithCodex(label) {
+  let run = await session.startAgentRun();
+  const deadline = Date.now() + 130000;
+  while (run.status === "queued" || run.status === "running") {
+    label.textContent = run.stage === "reading_request"
+      ? "Codex · reading request…"
+      : "Codex · calling Yigdesk tools…";
+    if (Date.now() >= deadline) throw new Error("Codex run timed out.");
+    await delay(250);
+    run = await session.getAgentRun(run.run_id);
+  }
+  if (run.status !== "completed") {
+    throw new Error(run.error?.message || "Codex output was rejected.");
+  }
+  return run;
 }
 
 async function analyze() {
@@ -117,22 +225,29 @@ async function analyze() {
   button.dataset.state = "loading";
   button.setAttribute("aria-busy", "true");
   byId("workspace").setAttribute("aria-busy", "true");
+  document.querySelectorAll("[data-scenario]").forEach((scenarioButton) => { scenarioButton.disabled = true; });
   label.textContent = "Reading + tracing…";
-  setStep("calculate");
+  showAnalysisPending();
   try {
-    const response = await session.previewConsequence();
-    renderPacket(response.packet);
-    label.textContent = "Analyze again with Codex";
+    if (state.agent?.available) {
+      const run = await runWithCodex(label);
+      renderPacket(run.packet, run);
+      label.textContent = "Analyze again with Codex";
+    } else {
+      const response = await session.previewConsequence();
+      renderPacket(response.packet);
+      label.textContent = "Preview again locally";
+    }
   } catch (error) {
-    label.textContent = "Try analysis again";
-    byId("verdict").textContent = "PREVIEW ERROR";
-    byId("verdict").className = "verdict hold";
+    label.textContent = state.agent?.available ? "Retry Codex analysis" : "Retry local preview";
+    showAnalysisError(Boolean(state.agent?.available));
     console.error(error);
   } finally {
     button.disabled = false;
     button.dataset.state = "idle";
     button.removeAttribute("aria-busy");
     byId("workspace").removeAttribute("aria-busy");
+    document.querySelectorAll("[data-scenario]").forEach((scenarioButton) => { scenarioButton.disabled = false; });
   }
 }
 
@@ -153,13 +268,18 @@ async function chooseScenario(scenarioId) {
 
 async function copyPacket() {
   if (!state.packet) return;
+  const packet = state.packet;
   const button = byId("copy-packet");
   const label = button.firstElementChild;
   try {
-    await navigator.clipboard.writeText(JSON.stringify(state.packet, null, 2));
+    const proof = state.agentRun || { packet: state.packet, mode: "local-preview" };
+    await navigator.clipboard.writeText(JSON.stringify(proof, null, 2));
+    if (state.packet !== packet) return;
     label.textContent = "Packet copied";
     button.dataset.state = "copied";
-    window.setTimeout(() => {
+    state.copyResetTimer = window.setTimeout(() => {
+      state.copyResetTimer = null;
+      if (state.packet !== packet) return;
       label.textContent = "Copy proof packet";
       button.dataset.state = "idle";
     }, 1800);

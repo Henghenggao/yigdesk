@@ -26,7 +26,9 @@ headroom      = 45.5% - 40%      = 5.5 points
 
 ## Run locally
 
-Requirements: Python 3.11+ and Node.js 20+.
+Requirements: Python 3.11+ and Node.js 20+. Local deterministic preview needs no
+OpenAI credential. Real Codex mode requires an authenticated Codex CLI; use an
+existing Codex login locally or a server-side <code>CODEX_API_KEY</code> in automation.
 
 ~~~bash
 python -m pip install -r requirements.txt
@@ -34,7 +36,23 @@ npm ci
 python -m yigdesk.app
 ~~~
 
-Open <http://127.0.0.1:8787>. No API key is required because all data and the five-formula preview adapter are local and synthetic.
+Open <http://127.0.0.1:8787>. With Codex disabled, the button is explicitly
+labeled **Preview consequence locally** and all data plus the five-formula
+adapter remain local and synthetic.
+
+To enable the real Codex + MCP path in PowerShell:
+
+~~~powershell
+$env:YIGDESK_CODEX_ENABLED = "1"
+$env:YIGDESK_CODEX_MODEL = "gpt-5.6-sol"
+python -m yigdesk.app
+~~~
+
+The button is labeled **Analyze with Codex** only in this mode. Codex must call
+<code>get_deal_context</code>, <code>preview_consequence</code>, and
+<code>inspect_evidence</code>. Yigdesk rejects the answer if the audited tool
+trace, packet ID, verdict, evidence address, or any displayed figure drifts from
+the deterministic packet. There is no silent fallback.
 
 CLI:
 
@@ -44,6 +62,47 @@ python -m yigdesk.cli analyze
 python -m yigdesk.cli inspect "Deal Model!B4"
 python -m yigdesk.cli reset --scenario hold
 ~~~
+
+MCP server, for direct Inspector or client testing:
+
+~~~bash
+python -m yigdesk.mcp_server
+~~~
+
+## Private A/B comparison
+
+Copy <code>benchmarks/case-template.json</code> into the ignored
+<code>benchmarks/private/</code> directory and replace it with an independently
+verified case plus gold result. Then run the same Codex model bare and with
+Yigdesk assistance:
+
+~~~bash
+python -m scripts.compare_agents \
+  --case benchmarks/private/case.json \
+  --runs 3 \
+  --acknowledge-data-sharing
+~~~
+
+Both modes send the supplied request and inputs to OpenAI, so the acknowledgement
+is mandatory. Reports are written under ignored <code>benchmark-results/</code>
+and contain only case ID, verdict/metrics, latency, token usage, proof hashes, and
+tool names. They exclude the email body and raw inputs. Private case content is
+streamed to bare Codex over stdin and is never placed in process arguments.
+
+Accuracy uses decimal values plus field-specific units, so <code>$880k</code> and
+<code>$880.0k</code>, or <code>5.5%</code> and <code>5.50 percentage points</code>,
+are semantically equivalent. Exact display-format consistency is reported
+separately. Bare Codex receives the same intermediate rounding contract as the
+reference engine: money intermediates use <code>0.01k / ROUND_HALF_UP</code>, while
+margin and headroom use <code>0.1 percentage point / ROUND_HALF_UP</code>. Semantic
+scoring then normalizes high-precision answers to the final display resolution:
+whole thousands with <code>ROUND_HALF_EVEN</code> and percentage points to one
+decimal with <code>ROUND_HALF_UP</code>. The JSON report embeds this contract.
+
+The report also shows the deterministic engine result versus the independent
+gold, and records individual trial failures plus failure rate instead of
+discarding an otherwise usable comparison. Use at least three paired runs for a
+meaningful comparison; the harness alternates AB/BA order.
 
 Tests:
 
@@ -71,7 +130,11 @@ See [Open-core boundary](docs/OPEN_CORE_BOUNDARY.md), [Architecture](docs/ARCHIT
 
 Codex was used as the primary engineering agent to narrow the office workflow, implement the full-stack demo, challenge the read-only and refusal claims, add the live incomplete-evidence path, polish the product surface, and drive Python plus browser acceptance tests. The important product decision was to make evidence visible before any action rather than asking users to trust an agent's prose.
 
-The project targets the **Work & Productivity** category. The official submission requires a working project, description, sub-three-minute public demo video, testable repository, and the primary Codex <code>/feedback</code> session ID.
+The project targets the **Work & Productivity** category. The runtime now contains
+a real Codex tool-use path in addition to Codex being the primary engineering
+agent. The official submission requires a working project, description,
+sub-three-minute public demo video, testable repository, and the primary Codex
+<code>/feedback</code> session ID.
 
 ## License and rights
 

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "metrics", "evidence_refs"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["READY FOR CFO", "HOLD"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["net_arr", "arr_impact", "gross_margin", "headroom"],
+      "properties": {
+        "net_arr": { "type": "string", "description": "USD currency with an explicit thousand or million scale; additional correct precision is allowed." },
+        "arr_impact": { "type": "string", "description": "Signed USD currency with an explicit thousand or million scale; additional correct precision is allowed." },
+        "gross_margin": { "type": "string", "description": "A percentage with %, percent, or percentage as the unit; additional correct precision is allowed." },
+        "headroom": { "type": "string", "description": "Percentage-point headroom expressed as %, pp, or percentage points; additional correct precision is allowed." }
+      }
+    },
+    "evidence_refs": { "type": "array", "items": { "type": "string" } }
+  }
+}

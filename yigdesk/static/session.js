@@ -23,6 +23,17 @@ export class YigdeskSession {
     return this.#request("/api/analyze", { method: "POST", body: "{}" });
   }
 
+  async startAgentRun() {
+    return this.#request("/api/agent-runs", { method: "POST", body: "{}" });
+  }
+
+  async getAgentRun(runId) {
+    if (typeof runId !== "string" || !runId.startsWith("arun-")) {
+      throw new Error("A canonical agent run id is required.");
+    }
+    return this.#request(`/api/agent-runs/${encodeURIComponent(runId)}`);
+  }
+
   async #request(path, options = {}) {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...options,

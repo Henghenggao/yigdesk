@@ -14,7 +14,6 @@
   </head>
   <body>
     <a class="skip-link" href="#workspace">Skip to consequence workspace</a>
-    <div class="paper-grid" aria-hidden="true"></div>
     <header class="masthead">
       <a class="brand" href="/" aria-label="Yigdesk home">
         <span class="brand-mark" aria-hidden="true"><i>Y</i><i>D</i></span>
@@ -30,27 +29,13 @@
 
     <main>
       <section class="hero" aria-labelledby="page-title">
-        <div>
-          <p class="eyebrow">Work &amp; Productivity · Codex change preflight</p>
-          <h1 id="page-title">See the consequence<br />before the agent acts.</h1>
-        </div>
-        <div class="hero-aside">
-          <p class="hero-copy">
-            A forwarded discount request becomes a workbook-backed preview. Codex reads;
-            a small deterministic demo adapter calculates; Yigdesk exposes every bound cell.
-          </p>
-          <div class="hero-proof" aria-label="Public demo posture">
-            <span>Proof posture</span>
-            <strong>Read-only analysis</strong>
-            <small>Exact source objects · honest refusal</small>
-          </div>
-        </div>
+        <h1 id="page-title">See the consequence before the agent acts.</h1>
+        <p class="hero-copy">A forwarded discount request becomes a workbook-backed preview — every figure binds to an exact source cell, or the verdict is an honest HOLD. Read-only; no business write-back.</p>
       </section>
 
       <section class="scenario-bar" aria-label="Demo scenario">
         <div>
-          <span class="section-index">00</span>
-          <span class="scenario-label">Choose evidence state</span>
+          <span class="scenario-label">Evidence state</span>
         </div>
         <div class="scenario-switch" role="group" aria-label="Evidence scenario">
           <button type="button" data-scenario="ready" class="scenario-button is-active">
@@ -63,13 +48,6 @@
           </button>
         </div>
       </section>
-
-      <ol class="process-strip" aria-label="Preview process">
-        <li class="is-current" data-step="read"><span class="step-number">01</span><span class="step-label">Read<small>source</small></span></li>
-        <li data-step="calculate"><span class="step-number">02</span><span class="step-label">Calculate<small>preview</small></span></li>
-        <li data-step="trace"><span class="step-number">03</span><span class="step-label">Trace<small>evidence</small></span></li>
-        <li data-step="review"><span class="step-number">04</span><span class="step-label">Review<small>packet</small></span></li>
-      </ol>
 
       <section class="workspace" id="workspace" aria-label="Consequence workspace">
         <article class="inbox-panel panel" aria-labelledby="inbox-heading">
@@ -94,10 +72,10 @@
             <span class="attachment-state">read only</span>
           </div>
           <button type="button" class="primary-action" id="analyze" data-testid="analyze" aria-describedby="read-wall">
-            <span class="action-label">Analyze with Codex</span>
+            <span class="action-label">Loading analysis mode…</span>
             <span class="action-icon" aria-hidden="true"><span class="icon-arrow">↗</span><span class="icon-loading"></span></span>
           </button>
-          <p class="read-wall" id="read-wall"><span aria-hidden="true">◉</span> Analysis can preview, never alter the source</p>
+          <p class="read-wall" id="read-wall"><span aria-hidden="true">◉</span> Analysis mode is loading</p>
         </article>
 
         <article class="decision-panel panel" aria-labelledby="decision-heading">
@@ -106,10 +84,9 @@
             <span class="verdict idle" id="verdict" data-testid="verdict" role="status" aria-live="polite">NOT ANALYZED</span>
           </header>
 
-          <div class="decision-empty" id="decision-empty">
-            <div class="proof-seal" aria-hidden="true"><span>5</span><small>cells</small></div>
-            <h3>Nothing inferred yet.</h3>
-            <p>Run a read-only preview to bind every displayed figure to one source packet.</p>
+          <div class="decision-empty" id="decision-empty" role="status" aria-live="polite">
+            <h3 id="decision-empty-heading">Nothing inferred yet.</h3>
+            <p id="decision-empty-message">Run a read-only preview to bind all five output cells to one source packet.</p>
           </div>
 
           <div class="decision-content" id="decision-content" hidden>
@@ -124,6 +101,13 @@
               <span id="byte-proof">Workbook bytes unchanged</span>
             </div>
             <ul class="evidence-list" id="evidence-list"></ul>
+            <div class="review-wall" id="agent-proof" hidden>
+              <div>
+                <span class="actor-avatar" aria-hidden="true">CX</span>
+                <span><strong id="agent-mode">Codex + Yigdesk MCP</strong><small id="agent-meta">run pending</small></span>
+              </div>
+              <span class="scope-chip" id="agent-verified">ENGINE MATCH VERIFIED</span>
+            </div>
             <div class="review-wall">
               <div>
                 <span class="actor-avatar" aria-hidden="true">ML</span>
@@ -157,7 +141,7 @@
           <p class="eyebrow" id="packet-eyebrow">Portable proof ready</p>
           <h2 id="packet-heading">ConsequencePacket prepared.</h2>
           <p><code id="packet-id">cpkt-pending</code> · <span id="packet-scope">synthetic adapter</span></p>
-          <button type="button" id="copy-packet"><span>Copy proof packet</span><span aria-hidden="true">↗</span></button>
+          <button type="button" id="copy-packet" disabled><span>Copy proof packet</span><span aria-hidden="true">↗</span></button>
         </div>
         <div class="reply-card">
           <span id="memo-status">DRAFT · NOT SENT</span>

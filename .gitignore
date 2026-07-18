@@ -9,3 +9,6 @@ runtime/*
 !runtime/.gitkeep
 .env
 *.log
+.claude/settings.local.json
+benchmark-results/
+benchmarks/private/

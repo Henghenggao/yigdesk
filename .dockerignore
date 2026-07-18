@@ -1,9 +1,14 @@
 .git
+.env
+.claude
+*.log
 .venv
 __pycache__
 .pytest_cache
 node_modules
 runtime
+benchmark-results
+benchmarks/private
 test-results
 playwright-report
 
