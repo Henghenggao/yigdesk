@@ -24,6 +24,8 @@ function setStep(active) {
     const index = order.indexOf(item.dataset.step);
     item.classList.toggle("is-current", index === activeIndex);
     item.classList.toggle("is-done", index < activeIndex);
+    if (index === activeIndex) item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
   });
 }
 
@@ -36,13 +38,16 @@ function renderStory(payload) {
   byId("subject").textContent = scenario.subject;
   byId("message").textContent = scenario.message;
   document.querySelectorAll("[data-scenario]").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.scenario === payload.scenario_id);
+    const isActive = button.dataset.scenario === payload.scenario_id;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
   });
   byId("fingerprint").textContent = `sha256 · ${payload.workbook.fingerprint.slice(0, 12)}`;
 }
 
 function clearPreview() {
   state.packet = null;
+  document.body.dataset.outcome = "idle";
   byId("decision-empty").hidden = false;
   byId("decision-content").hidden = true;
   byId("packet-export").hidden = true;
@@ -51,12 +56,15 @@ function clearPreview() {
   byId("packet-status").textContent = "PREVIEW ONLY";
   byId("workbook-grid").packet = null;
   byId("model-inspector").packet = null;
+  byId("copy-packet").firstElementChild.textContent = "Copy proof packet";
+  byId("copy-packet").dataset.state = "idle";
   setStep("read");
 }
 
 function renderPacket(packet) {
   state.packet = packet;
   const consequence = packet.consequence;
+  document.body.dataset.outcome = consequence.complete ? "ready" : "hold";
   byId("decision-empty").hidden = true;
   byId("decision-content").hidden = false;
   byId("verdict").textContent = consequence.verdict;
@@ -65,7 +73,9 @@ function renderPacket(packet) {
   byId("net-arr").textContent = consequence.display.net_arr;
   byId("arr-impact").textContent = consequence.display.arr_impact;
   byId("gross-margin").textContent = consequence.display.gross_margin;
-  byId("headroom").textContent = `${consequence.display.headroom} above floor`;
+  byId("headroom").textContent = consequence.display.headroom === "Unavailable"
+    ? "Floor check unavailable"
+    : `${consequence.display.headroom} above floor`;
   byId("byte-proof").textContent = packet.analysis_bytes_unchanged
     ? "Workbook bytes unchanged"
     : "Source drift detected";
@@ -89,6 +99,9 @@ function renderPacket(packet) {
   byId("model-inspector").packet = packet;
   byId("packet-id").textContent = packet.packet_id;
   byId("packet-scope").textContent = packet.implementation_scope;
+  byId("packet-mark").textContent = consequence.complete ? "✓" : "!";
+  byId("packet-eyebrow").textContent = consequence.complete ? "Portable proof ready" : "Refusal proof ready";
+  byId("packet-heading").textContent = consequence.complete ? "ConsequencePacket prepared." : "Hold packet prepared.";
   byId("packet-export").hidden = false;
   byId("memo-status").textContent = consequence.complete ? "DRAFT · NOT SENT" : "NOT PREPARED";
   byId("memo-body").textContent = consequence.complete
@@ -99,21 +112,33 @@ function renderPacket(packet) {
 
 async function analyze() {
   const button = byId("analyze");
+  const label = button.querySelector(".action-label");
   button.disabled = true;
-  button.firstElementChild.textContent = "Reading + tracing…";
+  button.dataset.state = "loading";
+  button.setAttribute("aria-busy", "true");
+  byId("workspace").setAttribute("aria-busy", "true");
+  label.textContent = "Reading + tracing…";
   setStep("calculate");
   try {
     const response = await session.previewConsequence();
     renderPacket(response.packet);
-    button.firstElementChild.textContent = "Analyze again with Codex";
+    label.textContent = "Analyze again with Codex";
   } catch (error) {
-    button.firstElementChild.textContent = error.message;
+    label.textContent = "Try analysis again";
+    byId("verdict").textContent = "PREVIEW ERROR";
+    byId("verdict").className = "verdict hold";
+    console.error(error);
   } finally {
     button.disabled = false;
+    button.dataset.state = "idle";
+    button.removeAttribute("aria-busy");
+    byId("workspace").removeAttribute("aria-busy");
   }
 }
 
 async function chooseScenario(scenarioId) {
+  const scenarioSwitch = document.querySelector(".scenario-switch");
+  scenarioSwitch.setAttribute("aria-busy", "true");
   document.querySelectorAll("[data-scenario]").forEach((button) => { button.disabled = true; });
   try {
     const payload = await demoApi("/api/reset", { scenario_id: scenarioId });
@@ -122,13 +147,26 @@ async function chooseScenario(scenarioId) {
     await byId("workbook-grid").refresh();
   } finally {
     document.querySelectorAll("[data-scenario]").forEach((button) => { button.disabled = false; });
+    scenarioSwitch.removeAttribute("aria-busy");
   }
 }
 
 async function copyPacket() {
   if (!state.packet) return;
-  await navigator.clipboard.writeText(JSON.stringify(state.packet, null, 2));
-  byId("copy-packet").textContent = "Packet copied";
+  const button = byId("copy-packet");
+  const label = button.firstElementChild;
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(state.packet, null, 2));
+    label.textContent = "Packet copied";
+    button.dataset.state = "copied";
+    window.setTimeout(() => {
+      label.textContent = "Copy proof packet";
+      button.dataset.state = "idle";
+    }, 1800);
+  } catch (error) {
+    label.textContent = "Copy unavailable";
+    console.error(error);
+  }
 }
 
 document.addEventListener("DOMContentLoaded", async () => {

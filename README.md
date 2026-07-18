@@ -65,7 +65,7 @@ This repository is a deliberately narrow adoption surface:
 
 It does **not** contain the proprietary Yigrid kernel, general DAG semantics, operational history, governance/authorization, persistent write-back, vault, signing, transparency log, compliance, SSO, or multi-tenant services. The public packet is a demo protocol, not a Yigrid production attestation.
 
-See [Open-core boundary](docs/OPEN_CORE_BOUNDARY.md) and [Architecture](docs/ARCHITECTURE.md).
+See [Open-core boundary](docs/OPEN_CORE_BOUNDARY.md), [Architecture](docs/ARCHITECTURE.md), and the [Evidence Ledger design system](docs/DESIGN_SYSTEM.md).
 
 ## How Codex shaped the build
 
