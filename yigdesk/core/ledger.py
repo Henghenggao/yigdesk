@@ -3,7 +3,7 @@ from pathlib import Path
 from .ops import Op, op_to_json, op_from_json
 
 class Ledger:
-    """Append-only op-log. The single writer; assigns monotonic seq."""
+    """Append-only operation log (single writer; assigns monotonic seq)."""
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
