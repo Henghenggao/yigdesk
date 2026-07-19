@@ -17,7 +17,7 @@ server never writes back to the source model."""
 mcp = FastMCP("Yigdesk", instructions=INSTRUCTIONS, json_response=True)
 
 def _bb() -> Blackboard:
-    scn = Path(os.environ.get("YIGDESK_SCENARIO", "data/scenarios/discount_approval"))
+    scn = Path(os.environ["YIGDESK_SCENARIO"])
     model = json.loads((scn / "model.json").read_text(encoding="utf-8"))
     src = ModelSource(scn / model["workbook"], model["input_refs"])
     return Blackboard(os.environ.get("YIGDESK_LEDGER", "runtime/board.jsonl"),
