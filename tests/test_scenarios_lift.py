@@ -14,4 +14,4 @@ def _price(scn, action):
 def test_both_scenarios_price_with_same_engine():
     subprocess.run([sys.executable, str(ROOT/"scripts/build_scenarios.py")], check=True)
     assert _price("discount_approval", {"overrides":{"discount":12}}).verdict == "ok"
-    assert _price("saas_margin", {"overrides":{"expansion_pct":20}}).verdict in ("ok","hold")
+    assert _price("saas_margin", {"overrides":{"expansion_pct":20}}).verdict == "ok"

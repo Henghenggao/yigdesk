@@ -1,6 +1,12 @@
 from __future__ import annotations
-from .model import Board, Decision, Candidate, Claim, Approval, DecisionRecord
+from .model import Board, Decision, Candidate, Claim, Approval, DecisionRecord, Consequence, Metric
 from .ops import OPEN_DECISION, PROPOSE_CANDIDATE, POST_CLAIM, CAST_APPROVAL, RESOLVED
+
+def _rehydrate_consequence(payload):
+    if payload is None or not isinstance(payload, dict):
+        return payload
+    return Consequence(payload["verdict"], [Metric(**m) for m in payload["metrics"]],
+                       payload["evidence_refs"], payload["fingerprint"])
 
 def fold(ops) -> Board:
     board = Board()
@@ -13,8 +19,8 @@ def fold(ops) -> Board:
         elif op.kind == PROPOSE_CANDIDATE and d:
             d.candidates[p["candidate_id"]] = Candidate(
                 id=p["candidate_id"], author=op.actor, action=p["action"],
-                consequence=p.get("consequence"), status=p.get("status", "priced"))
-        elif op.kind == POST_CLAIM and d:
+                consequence=_rehydrate_consequence(p.get("consequence")), status=p.get("status", "priced"))
+        elif op.kind == POST_CLAIM and d and p.get("status") != "rejected":
             d.claims[p["claim_id"]] = Claim(
                 id=p["claim_id"], author=op.actor, type=p["type"], target=p["target"],
                 body=p.get("body",""), grounded_refs=p.get("grounded_refs", []),

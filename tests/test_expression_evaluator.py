@@ -36,3 +36,16 @@ def test_missing_required_input_yields_hold(tmp_path):
 def test_price_is_deterministic(tmp_path):
     ev = ExpressionEvaluator(MODEL); s = _src(tmp_path)
     assert ev.price({"overrides":{"discount":12}}, s) == ev.price({"overrides":{"discount":12}}, s)
+
+def test_non_numeric_override_fails_closed(tmp_path):
+    ev = ExpressionEvaluator(MODEL)
+    c = ev.price({"overrides":{"discount":"oops"}}, _src(tmp_path))
+    assert c.verdict == "hold"
+
+def test_divide_by_zero_fails_closed(tmp_path):
+    model = {"input_refs":{"a":"Deal Inputs!B2","b":"Deal Inputs!B3"},
+             "metrics":[{"id":"r","label":"R","formula":"a / (b - b)"}], "constraints":[]}
+    wb_path = _src(tmp_path).path  # reuse a workbook with B2/B3 present
+    from yigdesk.evaluator.model_source import ModelSource
+    c = ExpressionEvaluator(model).price({}, ModelSource(wb_path, model["input_refs"]))
+    assert c.verdict == "hold" and c.metrics[0].after is None

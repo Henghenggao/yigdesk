@@ -1,7 +1,9 @@
 from __future__ import annotations
 import ast, hashlib, json, operator
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation, DivisionByZero, localcontext
 from yigdesk.core.model import Consequence, Metric
+
+_EVAL_CODE_VERSION = "1"
 
 _OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
         ast.Div: operator.truediv, ast.USub: operator.neg}
@@ -23,28 +25,36 @@ class ExpressionEvaluator:
     """Deterministic evaluator whose model (metrics/formulas/constraints) is pure data."""
     def __init__(self, model: dict):
         self.model = model
-        self.revision = "expr:" + hashlib.sha256(
+        self.revision = "expr:v" + _EVAL_CODE_VERSION + ":" + hashlib.sha256(
             json.dumps(model, sort_keys=True).encode()).hexdigest()[:12]
 
     def ground(self, ref: str, source) -> bool:
         return source.exists(ref)
 
     def _compute(self, inputs: dict) -> dict[str, Decimal | None]:
-        env = dict(inputs); out: dict[str, Decimal | None] = {}
-        for spec in self.model["metrics"]:
-            missing = [r for r in spec.get("requires", []) if r not in inputs]
-            if missing:
-                out[spec["id"]] = None; continue
-            try:
-                val = _eval(ast.parse(spec["formula"], mode="eval"), env)
-            except KeyError:
-                out[spec["id"]] = None; continue
-            env[spec["id"]] = val; out[spec["id"]] = val
-        return out
+        with localcontext() as ctx:
+            ctx.prec = 28
+            env = dict(inputs); out: dict[str, Decimal | None] = {}
+            for spec in self.model["metrics"]:
+                missing = [r for r in spec.get("requires", []) if r not in inputs]
+                if missing:
+                    out[spec["id"]] = None; continue
+                try:
+                    val = _eval(ast.parse(spec["formula"], mode="eval"), env)
+                except (KeyError, InvalidOperation, DivisionByZero, ArithmeticError):
+                    out[spec["id"]] = None; continue
+                env[spec["id"]] = val; out[spec["id"]] = val
+            return out
 
     def price(self, action: dict, source) -> Consequence:
         base = source.base_inputs()
-        after_inputs = {**base, **{k: Decimal(str(v)) for k, v in action.get("overrides", {}).items()}}
+        try:
+            overrides = {k: Decimal(str(v)) for k, v in action.get("overrides", {}).items()}
+        except (InvalidOperation, ValueError):
+            metrics = [Metric(s["id"], s["label"], None, None, None, s.get("unit", ""))
+                       for s in self.model["metrics"]]
+            return Consequence("hold", metrics, list(self.model["input_refs"].values()), source.fingerprint)
+        after_inputs = {**base, **overrides}
         before, after = self._compute(base), self._compute(after_inputs)
         metrics = [Metric(s["id"], s["label"],
                           None if after[s["id"]] is None else _q(after[s["id"]]),

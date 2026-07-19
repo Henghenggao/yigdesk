@@ -26,9 +26,10 @@ def resolve(d: Decision, evaluator_revision: str, seq: int = 0):
         return Pending("no candidate passes constraints (all HOLD/failed)")
     selector = d.policy.get("candidate_selector", "human_selected")
     if selector == "human_selected":
-        picked = [a.scope for a in d.approvals if a.verdict == "approve" and a.scope in d.candidates]
+        eligible_ids = {c.id for c in eligible}
+        picked = [a.scope for a in d.approvals if a.verdict == "approve" and a.scope in eligible_ids]
         if not picked:
-            return Pending("human selection required")
+            return Pending("human selection required (no approved eligible candidate)")
         chosen_id, closed_by = sorted(picked)[0], "human"
     elif selector.startswith("max:"):
         metric = selector.split(":", 1)[1]

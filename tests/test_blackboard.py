@@ -26,7 +26,7 @@ def test_end_to_end_open_propose_approve_resolve(tmp_path):
                      {"required_approvals":[{"role":"cfo","verdict":"approve"}],"candidate_selector":"max:headroom"},
                      actor="human:cfo", role="owner")
     bb.propose_candidate("d1","c1",{"overrides":{"discount":12}}, actor="agent:a", role="proposer")
-    assert bb.project().decisions["d1"].candidates["c1"].consequence["verdict"] == "ok"
+    assert bb.project().decisions["d1"].candidates["c1"].consequence.verdict == "ok"
     assert bb.request_resolve("d1", actor="agent:a", role="proposer").reason
     bb.cast_approval("d1","approve","c1", actor="human:cfo", role="cfo")
     rec = bb.request_resolve("d1", actor="human:cfo", role="cfo")

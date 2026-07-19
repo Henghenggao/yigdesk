@@ -1,7 +1,7 @@
 from openpyxl import Workbook
 from yigdesk.core.ledger import Ledger
 from yigdesk.core.projection import fold
-from yigdesk.core.blackboard import Blackboard, _rehydrate
+from yigdesk.core.blackboard import Blackboard
 from yigdesk.core.gate import resolve
 from yigdesk.evaluator.expression import ExpressionEvaluator
 from yigdesk.evaluator.model_source import ModelSource
@@ -38,6 +38,19 @@ def test_d4_resolve_is_pure(tmp_path):
     bb.open_decision("d1","q","discount",{"required_approvals":[{"role":"cfo","verdict":"approve"}],"candidate_selector":"max:headroom"}, actor="h", role="owner")
     bb.propose_candidate("d1","c1",{"overrides":{"discount":12}}, actor="a", role="proposer")
     bb.cast_approval("d1","approve","c1", actor="cfo", role="cfo")
-    d = bb.project().decisions["d1"]
-    for c in d.candidates.values(): c.consequence = _rehydrate(c.consequence)
-    assert resolve(d, "rev") == resolve(d, "rev")
+    assert resolve(bb.project().decisions["d1"], "rev") == resolve(bb.project().decisions["d1"], "rev")
+
+def test_d2_full_flow_replays_byte_identical_from_disk(tmp_path):
+    import json as _json
+    from dataclasses import asdict as _asdict
+    bb = _bb(tmp_path)
+    bb.open_decision("d1","q","discount",{"required_approvals":[{"role":"cfo","verdict":"approve"}],"candidate_selector":"max:headroom"}, actor="h", role="owner")
+    bb.propose_candidate("d1","c1",{"overrides":{"discount":12}}, actor="a", role="proposer")
+    bb.cast_approval("d1","approve","c1", actor="cfo", role="cfo")
+    bb.request_resolve("d1", actor="cfo", role="cfo")
+    def snapshot():
+        board = fold(Ledger(tmp_path/"board.jsonl").read())
+        d = board.decisions["d1"]
+        return _json.dumps({"status": d.status, "record": _asdict(d.resolution)}, sort_keys=True)
+    assert snapshot() == snapshot()
+    assert bb.project().decisions["d1"].status == "resolved"

@@ -41,18 +41,9 @@ class Blackboard:
             {"decision_id": decision_id, "verdict": verdict, "scope": scope})
 
     def request_resolve(self, decision_id, *, actor, role):
-        board = self.project(); d = board.decisions[decision_id]
-        for cand in d.candidates.values():
-            cand.consequence = _rehydrate(cand.consequence)
+        d = self.project().decisions[decision_id]
         result = resolve(d, self.ev.revision, seq=self.ledger.next_seq())
         if isinstance(result, Pending):
             return result
         self.ledger.append(K.RESOLVED, actor, role, {"decision_id": decision_id, "record": asdict(result)})
         return result
-
-def _rehydrate(payload):
-    from .model import Consequence, Metric
-    if payload is None or not isinstance(payload, dict):
-        return payload
-    return Consequence(payload["verdict"], [Metric(**m) for m in payload["metrics"]],
-                       payload["evidence_refs"], payload["fingerprint"])

@@ -26,7 +26,8 @@ def _bb() -> Blackboard:
 def _decision_dict(d):
     return {"id": d.id, "question": d.question, "status": d.status,
             "candidates": {cid: {"id": c.id, "author": c.author, "action": c.action,
-                                 "status": c.status, "consequence": c.consequence}
+                                 "status": c.status,
+                                 "consequence": (asdict(c.consequence) if c.consequence is not None else None)}
                            for cid, c in d.candidates.items()},
             "claims": {cid: cl.__dict__ for cid, cl in d.claims.items()},
             "approvals": [a.__dict__ for a in d.approvals],
