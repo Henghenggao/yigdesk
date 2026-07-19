@@ -32,12 +32,13 @@ def test_every_response_carries_locked_down_security_headers(tmp_path):
     assert response.headers["Referrer-Policy"] == "no-referrer"
 
 
-def test_static_surface_exposes_neutral_components_and_public_scope(tmp_path):
+def test_static_surface_exposes_the_board_root_and_public_scope(tmp_path):
     _, client = make_client(tmp_path)
     html = client.get("/").get_data(as_text=True)
     assert "Yigdesk" in html
-    assert "<yig-grid" in html
-    assert "<yig-model-inspector" in html
+    # The deterministic board view renders into this root: it is the shell's
+    # neutral public surface (superseding the retired read-only object view).
+    assert 'data-testid="board-root"' in html
     assert "No business write-back" in html
     assert "Deterministic decision blackboard" in html
 

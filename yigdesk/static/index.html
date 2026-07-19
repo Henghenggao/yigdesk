@@ -31,19 +31,6 @@
       <p class="board-loading">Loading decision board…</p>
     </main>
 
-    <!--
-      Domain-neutral component library. Yigdesk ships these read-only components
-      (<yig-grid> / <yig-model-inspector>) as part of its neutral public surface.
-      The deterministic board projection carries candidates + metrics, not
-      workbook cells, and exposes no cell-level view/inspect endpoint, so the
-      components are retained here inert (inside a template) rather than wired to
-      the board DTO. app.js renders candidates/metrics with plain elements.
-    -->
-    <template id="neutral-components">
-      <yig-grid aria-label="Read-only object view"></yig-grid>
-      <yig-model-inspector></yig-model-inspector>
-    </template>
-
     <footer>
       <span>Yigdesk</span>
       <span>Deterministic decision blackboard</span>
