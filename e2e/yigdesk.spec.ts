@@ -1,21 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-
-function runProcess(command: string, args: string[]): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: process.cwd(),
-      env: process.env,
-      shell: false,
-      stdio: 'inherit',
-      windowsHide: true,
-    });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => resolve(code ?? (signal ? 1 : 0)));
-  });
-}
 
 test.beforeEach(async ({ request }) => {
   const reset = await request.post('/api/reset', { data: { scenario_id: 'ready' } });
@@ -153,61 +137,6 @@ test('Codex Work council progress is rendered from the revision audit', async ({
   await expect(page.locator('[data-council-actor="decision_optimizer"]')).toContainText('0/3');
   await expect(page.locator('#a2a-state')).toHaveText('A2A VERIFIED');
   await expect(page.locator('[data-council-actor="decision_optimizer"]')).toHaveAttribute('data-state', 'complete');
-});
-
-test('real Codex Work council completes from browser upload inside 120 seconds', async ({ page }) => {
-  test.skip(process.env.YIGDESK_REAL_COUNCIL !== '1', 'requires an authenticated Codex runtime');
-  test.setTimeout(125_000);
-  const sample = path.resolve('runtime/e2e-upload-sample.xlsx');
-  const runtime = path.resolve(process.env.YIGDESK_RUNTIME || 'runtime/e2e');
-  const reportPath = path.join(runtime, 'real-council-e2e-report.json');
-  const python = process.env.YIGDESK_PYTHON || 'python';
-  const baseURL = process.env.YIGDESK_BASE_URL || 'http://127.0.0.1:8791';
-
-  await page.goto('/');
-  await page.locator('#workbook-upload').setInputFiles(sample);
-  await page.locator('#requested-discount').fill('2.00');
-  await page.locator('#margin-floor').fill('30.00');
-  await page.locator('#upload-action').click();
-  await expect(page.locator('#upload-status')).toContainText('48 FY2024 source cells');
-  await expect(page.locator('#a2a-state')).toHaveText('CODEX WORK READY');
-
-  const completed = runProcess(python, [
-    '-m',
-    'scripts.run_real_council_e2e',
-    '--runtime',
-    runtime,
-    '--base-url',
-    baseURL,
-    '--timeout-seconds',
-    '120',
-    '--report',
-    reportPath,
-    '--acknowledge-data-sharing',
-  ]);
-  await expect(page.locator('#a2a-state')).toHaveText(/COUNCIL \d+\/15|A2A VERIFIED/, {
-    timeout: 120_000,
-  });
-  expect(await completed).toBe(0);
-
-  const report = JSON.parse(await readFile(reportPath, 'utf-8'));
-  expect(report.status).toBe('passed');
-  expect(report.verified).toBe(true);
-  expect(report.accepted_call_count).toBe(15);
-  expect(report.elapsed_ms).toBeLessThan(120_000);
-  expect(report.first_mcp_call_ms).toBeLessThan(120_000);
-  expect(report.fast_mode).toBe(false);
-  expect(report.reasoning_effort).toBe('none');
-  expect(report.model).toBe('gpt-5.6-terra');
-  expect(report.candidate.candidate_status).toBe('READY_FOR_EXTERNAL_AUDIT');
-  expect(report.candidate.revision_id).toBe(report.revision.revision_id);
-  expect(report.candidate.source_fingerprint).toBe(report.revision.source_fingerprint);
-  expect(report.candidate.commercial_optimality_proven).toBe(false);
-  expect(report.candidate.recommended_discount_pct).toBeNull();
-  expect(report.candidate.exact_max_discount_pct).toBe('2.239020');
-  expect(report.candidate.largest_safe_step_pct).toBe('2.23');
-  expect(report.candidate.first_unsafe_pct).toBe('2.24');
-  await expect(page.locator('#a2a-state')).toHaveText('A2A VERIFIED');
 });
 
 test('missing evidence produces an honest partial packet without an action control', async ({ page }) => {

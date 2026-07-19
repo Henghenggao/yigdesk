@@ -39,7 +39,7 @@ def test_static_surface_exposes_neutral_components_and_public_scope(tmp_path):
     assert "<yig-grid" in html
     assert "<yig-model-inspector" in html
     assert "No business write-back" in html
-    assert "proprietary Yigrid kernel not included" in html
+    assert "Deterministic decision blackboard" in html
 
 
 def test_state_returns_the_engine_free_session_shape(tmp_path):

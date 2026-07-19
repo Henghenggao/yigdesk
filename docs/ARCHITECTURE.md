@@ -1,75 +1,146 @@
 # Architecture
 
-Yigdesk is intentionally small enough for a judge to audit. The public runtime has four boundaries.
+Yigdesk is a standalone deterministic decision blackboard, deliberately small
+enough to audit end to end. Agents and humans decide together on a shared,
+append-only board: agents propose and challenge, a data-defined evaluator prices
+every candidate, and a deterministic gate — not a language model — commits the
+outcome. The source model is read-only; the ledger is the audit.
 
-## 1. Synthetic evidence intake
+The system is five units.
 
-<code>data/scenarios.json</code> provides two bundled safety fixtures. The browser
-may also upload a macro-free XLSX that is explicitly marked synthetic. The strict
-parser reads FY2024 quarterly cells from <code>P&amp;L Report</code>, records every
-source address and the source SHA-256, and builds a five-formula consequence
-projection. It does not contain or call the private Yigrid kernel.
+## 1. Blackboard Core — domain-neutral
 
-For natural-language Codex intake, `yigdesk.cli bind` validates the file before
-atomically activating a new ignored `runtime/sessions/&lt;id&gt;` directory. The session
-contains an unchanged source copy, derived projection, manifest, and its own council
-audit. Revision identity covers both source evidence and decision inputs, so rebinding
-the same bytes with a different discount or floor cannot reuse an old revision.
+`yigdesk/core/` knows nothing about any business domain. It is a ledger, a
+projection, and a gate over generic decisions, candidates, claims, and approvals.
 
-## 2. Read-only server
+- **Ledger** (`core/ledger.py`) — an append-only operation log. A single writer
+  assigns each op a monotonic `seq`; ops serialize to canonical JSON (sorted keys)
+  so the log is byte-stable.
+- **Ops** (`core/ops.py`) — the six op kinds and the `Op` record (`seq`, `kind`,
+  `actor`, `role`, `payload`, `base_seq`).
+- **Projection** (`core/projection.py`) — `fold(ops) -> Board`, a pure left fold
+  that rebuilds the whole board state from the log. Rejected (ungrounded) claims
+  are dropped during the fold, so they never appear in state.
+- **Gate** (`core/gate.py`) — `resolve(decision, revision, seq)`, a pure function
+  that returns `Pending(reason)` or a committed `DecisionRecord`.
+- **Model** (`core/model.py`) — the plain dataclasses (`Decision`, `Candidate`,
+  `Claim`, `Approval`, `Consequence`, `Metric`, `DecisionRecord`, `Board`).
+- **Blackboard** (`core/blackboard.py`) — the thin facade that wires the ledger to
+  an evaluator and a source and exposes the six op methods.
 
-The Flask API exposes state, object inspection, scenario reset, health, and consequence preview. Reset only regenerates a bundled synthetic fixture. Analysis hashes the XLSX before and after evaluation and reports whether the bytes match.
+## 2. Evaluator — pluggable, model-from-data
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| GET | <code>/api/health</code> | Public-preview health |
-| GET | <code>/api/state</code> | Synthetic email and workbook view |
-| GET | <code>/api/inspect?address=...</code> | Formula and lineage for one object |
-| POST | <code>/api/reset</code> | Choose a bundled synthetic scenario |
-| POST | <code>/api/upload</code> | Validate and parse one generated synthetic XLSX into an ephemeral revision |
-| POST | <code>/api/analyze</code> | Return a read-only demo consequence packet |
-| POST | <code>/api/proposals/evaluate</code> | Evaluate one proposal with exact policy math |
-| POST | <code>/api/proposals/compare</code> | Compare grounded proposals on one revision |
-| GET | <code>/api/proposals/boundary</code> | Find exact and step-aligned safe boundaries |
-| POST | <code>/api/proposals/stress-test</code> | Apply one explicit non-persistent COGS assumption |
-| GET | <code>/api/evidence/missing</code> | Explain terminal evidence gaps |
-| POST | <code>/api/agent-runs</code> | Start a real Codex + MCP run when explicitly configured |
-| GET | <code>/api/agent-runs/&lt;run_id&gt;</code> | Read one ephemeral verified run trace |
+`yigdesk/evaluator/` prices actions and grounds claims. It is a small `Evaluator`
+protocol (`base.py`: `price`, `ground`, `revision`), so a domain swaps the model,
+not the code.
 
-There is no action, write-back, authorization, signing, vault, persistent audit-service, or messaging endpoint.
+- **`ExpressionEvaluator`** (`evaluator/expression.py`) — the shipped evaluator.
+  Its model is **pure data**: input refs, metrics, formulas, and constraints from a
+  scenario's `model.json`. It evaluates formulas over exact `Decimal` arithmetic
+  through a restricted AST (only `+ - * /` and unary minus), quantizes with fixed
+  `ROUND_HALF_UP`, and derives its `revision` from a hash of the model — so a model
+  change is a new revision.
+- **`ModelSource`** (`evaluator/model_source.py`) — a read-only view of the source
+  workbook: base input values from named cells, a SHA-256 fingerprint of the bytes,
+  and `exists(ref)` for grounding. Constraints are decided on exact unrounded
+  values, never on display rounding.
 
-## 3. Codex orchestration boundary
+A candidate is priced into a `Consequence` (verdict `ok`/`hold`, per-metric
+before/after values, the evidence refs, and the source fingerprint). Missing inputs
+or a violated constraint yield `hold`.
 
-When enabled, <code>CodexRunner</code> starts <code>codex exec</code> in an isolated
-temporary directory with a read-only sandbox and fixed output schema. A stdio MCP
-server exposes eight read-only tools. The verified single-agent proof path is
-restricted to an exact three-call subset; project-scoped Codex subagents use the
-additional proposal, comparison, boundary, stress, and missing-evidence tools.
-The MCP process records a minimized
-tool trace independently of model output; Yigdesk then verifies packet ID, verdict,
-figures, inspected evidence, and source immutability before releasing the answer.
-When disabled, the UI says local preview and never claims a Codex runtime call.
+## 3. MCP Surface — six operations
 
-## 4. Domain-neutral public seam
+`yigdesk/blackboard_mcp.py` exposes the board as an MCP service (`FastMCP`,
+stdio). The entire agent-facing surface is six tools, one per op:
 
-<code>YigdeskSession</code> exposes only <code>getView</code>, <code>inspectRef</code>, and <code>previewConsequence</code>. <code>&lt;yig-grid&gt;</code> and <code>&lt;yig-model-inspector&gt;</code> consume generic object shapes. A boundary test rejects finance vocabulary in those three files.
+| Op | Effect |
+| --- | --- |
+| `open_decision` | Open a decision with question, type, and policy. |
+| `propose_candidate` | Price a candidate (input overrides) deterministically. |
+| `post_claim` | Post a typed claim; rejected fail-closed unless every ref grounds. |
+| `cast_approval` | Record an `approve` / `hold` / `reject` verdict. |
+| `request_resolve` | Run the gate → `pending(reason)` or a committed record. |
+| `read_board` | Return the deterministic board projection. |
 
-## 5. Scenario UI
+The server reads two environment variables: `YIGDESK_SCENARIO` (the scenario
+directory holding `model.json` and its workbook) and `YIGDESK_LEDGER` (the
+append-only board ledger). There is no mutation, write-back, authorization,
+signing, vault, audit-service, or messaging surface.
 
-The finance story belongs in <code>index.html</code>, <code>app.js</code>, fixtures, and the fixed adapter. The browser renders packet values and never recomputes the deal math.
+## 4. Human / Board bridge
 
-~~~mermaid
+Roles are separated so a proposer or critic can never close a decision:
+
+- proposer/critic agents call only `propose_candidate` and `post_claim`;
+- `open_decision`, `cast_approval`, and `request_resolve` stay with the
+  orchestrator or a human reviewer.
+
+The bridge is the policy read by the gate. A policy names its
+`required_approvals`, its `required_claims`, and a `candidate_selector`:
+
+- `human_selected` — the gate closes only on a candidate a human explicitly
+  approved (by scope), and never on a `hold` candidate;
+- `max:<metric>` — the gate picks the eligible candidate that maximizes a metric.
+
+Either way the close is deterministic and the committed `DecisionRecord` names the
+chosen candidate, who closed it (`human` or `policy`), the evidence refs, the
+evaluator revision, and the source fingerprint.
+
+## 5. Domain App — data plus config
+
+A domain lives entirely in data and configuration:
+
+- **Scenarios** (`data/scenarios/<name>/`) — `model.json` (evaluator model),
+  `policy.json` (approvals, required claims, selector), and a synthetic workbook.
+  `scripts/build_scenarios.py` materializes the workbooks.
+- **Council personas** (`.codex/agents/`) and the **`yigdesk-council` skill**
+  (`.agents/skills/`) — the flagship domain app over `data/scenarios/council_discount`.
+- **Web shell** (`yigdesk/app.py` + `yigdesk/static/`) — a minimal read-only
+  evidence view (health, synthetic-workbook upload, static assets). It owns
+  upload/session binding only; it does not evaluate the model or expose the board.
+
+## Op and data model
+
+Every board mutation is one ledger op; state is the fold of those ops.
+
+- `open_decision` → a `Decision` (id, question, type, policy).
+- `propose_candidate` → a `Candidate` carrying its priced `Consequence`.
+- `post_claim` → a `Claim` (`grounded` or `rejected`); only grounded claims fold in.
+- `cast_approval` → an `Approval` (actor, role, verdict, scope).
+- `request_resolve` → a `DecisionRecord`, appended as a `resolved` op, marking the
+  decision closed.
+
+## Determinism (D1–D4)
+
+Pinned by `tests/test_determinism_conformance.py`:
+
+- **D1 — deterministic pricing.** A consequence is a pure function of action and
+  source; the same action prices identically.
+- **D2 — state is a pure fold.** `fold(ledger)` replays byte-identically.
+- **D3 — grounding fails closed.** An ungrounded `post_claim` is rejected and never
+  enters state; the gate refuses to resolve without a required grounded claim.
+- **D4 — deterministic resolution.** `resolve(...)` is a pure function of
+  candidates, approvals, policy, and revision — no language model closes a decision.
+
+## Reuse: uploaded workbook as a source
+
+The offline intake path (`yigdesk/importer.py`, `yigdesk/session.py`,
+`yigdesk/cli.py`) validates and binds a synthetic upload into an immutable session
+whose bytes are re-verified against a recorded fingerprint. The
+`source_for_active_session` adapter (`evaluator/session_source.py`) wraps that
+bound session's projection workbook as a `ModelSource`, so the same evaluator that
+prices a packaged scenario can price an uploaded one — no second parser, no writes.
+
+```mermaid
 flowchart LR
-    E["Uploaded or generated synthetic XLSX"] --> X["Strict P&L parser + source fingerprint"]
-    X --> C["Codex in read-only sandbox"]
-    C --> M["Eight Yigdesk MCP tools"]
-    M --> A["Five-formula demo adapter"]
-    A --> P["Demo consequence packet"]
-    P --> V["Packet and trace verifier"]
-    V --> G["Read-only grid"]
-    V --> I["Model inspector"]
-    V --> H["READY FOR CFO or HOLD"]
-    M --> B["A2A proposal board"]
-~~~
-
-Private Yigrid engine, graph, operational-history, governance, mutation, and trust-service implementations are outside this repository.
+    S["Scenario model.json + workbook<br/>(or bound upload → ModelSource)"] --> EV["ExpressionEvaluator"]
+    A["Agent: propose_candidate / post_claim"] --> BB["Blackboard"]
+    EV --> BB
+    BB --> L["Append-only ledger"]
+    L --> F["fold → Board projection"]
+    F --> RB["read_board"]
+    H["Human / orchestrator:<br/>open · approve · resolve"] --> BB
+    F --> G["Deterministic gate"]
+    G --> R["pending(reason) or DecisionRecord"]
+```

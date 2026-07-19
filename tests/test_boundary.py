@@ -64,7 +64,7 @@ def test_private_kernel_signals_are_absent_from_public_runtime():
         for path in runtime
         if forbidden.search(_text(path))
     }
-    assert not hits, f"Private Yigrid kernel signal found in the public runtime: {hits}"
+    assert not hits, f"Private kernel signal found in the public runtime: {hits}"
 
 
 def test_legacy_brand_and_personal_machine_markers_are_absent():
@@ -104,3 +104,49 @@ def test_visual_system_uses_named_tokens_and_specific_transitions():
     assert "transition: all" not in css
     assert "font-variant-numeric: tabular-nums" in css
     assert "prefers-reduced-motion" in css
+
+
+def test_private_engine_name_is_absent_from_shipped_surface():
+    """Yigdesk is standalone: the private parent engine's name must not appear
+    anywhere in the shipped surface. The forbidden token is assembled from a
+    split literal so this guard file itself never carries a copy of it."""
+    forbidden = re.compile("yig" + "rid", re.IGNORECASE)
+    skip_dirs = {
+        ".git",
+        "node_modules",
+        "runtime",
+        ".pytest_cache",
+        "test-results",
+        "playwright-report",
+        "__pycache__",
+    }
+
+    def _skipped(path: Path) -> bool:
+        return any(part in skip_dirs for part in path.relative_to(ROOT).parts)
+
+    # docs/superpowers/** are internal planning/spec artifacts, not shipped, and
+    # legitimately discuss the separation from the private engine.
+    superpowers = ROOT / "docs" / "superpowers"
+    surface: list[Path] = [ROOT / "README.md"]
+    surface += [
+        path
+        for path in (ROOT / "yigdesk").rglob("*")
+        if path.is_file()
+        and path.suffix in {".py", ".js", ".html", ".css"}
+        and not _skipped(path)
+    ]
+    surface += [
+        path
+        for path in (ROOT / "docs").rglob("*.md")
+        if superpowers not in path.parents and not _skipped(path)
+    ]
+    surface += [path for path in (ROOT / "tests").rglob("*.py") if not _skipped(path)]
+
+    hits = sorted(
+        str(path.relative_to(ROOT))
+        for path in surface
+        if path.exists() and forbidden.search(_text(path))
+    )
+    assert not hits, (
+        "Private parent-engine name leaked into the shipped surface: " + ", ".join(hits)
+    )
