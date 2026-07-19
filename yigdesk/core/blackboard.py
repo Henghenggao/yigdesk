@@ -41,9 +41,14 @@ class Blackboard:
             {"decision_id": decision_id, "verdict": verdict, "scope": scope})
 
     def request_resolve(self, decision_id, *, actor, role):
-        d = self.project().decisions[decision_id]
-        result = resolve(d, self.ev.revision, seq=self.ledger.next_seq())
-        if isinstance(result, Pending):
+        with self.ledger.transaction() as txn:
+            board = fold(txn.read())
+            d = board.decisions[decision_id]
+            if d.resolution is not None:           # idempotent: already closed
+                return d.resolution
+            result = resolve(d, self.ev.revision, seq=txn.next_seq())
+            if isinstance(result, Pending):
+                return result
+            txn.append(K.RESOLVED, actor, role,
+                       {"decision_id": decision_id, "record": asdict(result)})
             return result
-        self.ledger.append(K.RESOLVED, actor, role, {"decision_id": decision_id, "record": asdict(result)})
-        return result

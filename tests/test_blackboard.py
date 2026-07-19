@@ -38,3 +38,40 @@ def test_ungrounded_claim_is_rejected(tmp_path):
     bb.open_decision("d1","q","discount",{}, actor="h", role="owner")
     claim = bb.post_claim("d1","cl1","evidence","d1","note",["Deal Inputs!Z99"], actor="agent:a", role="critic")
     assert claim.status == "rejected"
+
+def _resolvable_blackboard(tmp_path):
+    """A council-style d1 driven to a fully resolvable state.
+
+    Mirrors tests/test_council_audit.py: the council_discount policy requires a
+    cfo approval + a grounded risk claim + selector max:headroom. The candidate
+    overrides discount to 2%, which prices to headroom ~+11.02pt (>= 0 -> "ok"),
+    so request_resolve closes it via max:headroom.
+    """
+    bb = _bb(tmp_path)
+    bb.open_decision("d1","Approve the requested discount?","council_discount",
+                     {"required_approvals":[{"role":"cfo","verdict":"approve"}],
+                      "required_claims":[{"type":"risk"}],
+                      "candidate_selector":"max:headroom"},
+                     actor="human:cfo", role="owner")
+    bb.propose_candidate("d1","c1",{"overrides":{"discount":2}}, actor="agent:finance", role="proposer")
+    assert bb.project().decisions["d1"].candidates["c1"].consequence.verdict == "ok"
+    claim = bb.post_claim("d1","risk1","risk","d1",
+                          "A +5% COGS move erodes the thin discount headroom.",
+                          ["Deal Inputs!B4"], actor="agent:risk", role="critic")
+    assert claim.status == "grounded"
+    bb.cast_approval("d1","approve","c1", actor="human:cfo", role="cfo")
+    return bb
+
+def test_request_resolve_is_idempotent(tmp_path):
+    bb = _resolvable_blackboard(tmp_path)   # helper below: a d1 that WILL resolve
+    from yigdesk.core.gate import Pending
+    first = bb.request_resolve("d1", actor="human:web", role="cfo")
+    assert not isinstance(first, Pending)
+    resolved_1 = [o for o in bb.ledger.read() if o.kind == "resolved"]
+    assert len(resolved_1) == 1
+    assert first.seq == resolved_1[0].seq          # record seq == resolved op seq
+
+    second = bb.request_resolve("d1", actor="human:web", role="cfo")
+    resolved_2 = [o for o in bb.ledger.read() if o.kind == "resolved"]
+    assert len(resolved_2) == 1                     # NO second resolved op
+    assert second == first                          # same record
