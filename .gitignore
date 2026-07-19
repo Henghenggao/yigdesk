@@ -12,3 +12,6 @@ runtime/*
 .claude/settings.local.json
 benchmark-results/
 benchmarks/private/
+
+# generated scenario workbooks (built by scripts/build_scenarios.py)
+data/scenarios/**/*.xlsx
