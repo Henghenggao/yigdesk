@@ -10,6 +10,7 @@ POLICY = {"decision_type": "council_discount",
           "required_approvals": [{"role": "cfo", "verdict": "approve"}],
           "required_claims": [{"type": "risk"}],
           "candidate_selector": "max:headroom"}
+HS_POLICY = {**POLICY, "candidate_selector": "human_selected"}
 
 def _scenario(tmp_path):
     scn = tmp_path / "scn"; scn.mkdir()
@@ -64,3 +65,55 @@ def test_resolve_pends_before_approval_then_commits_then_replays(client):
 ])
 def test_board_op_rejects_bad_requests(client, body):
     assert client.post("/api/board/op", json=body).status_code == 400
+
+@pytest.mark.parametrize("bad_payload", ["x", []])
+def test_board_op_rejects_non_dict_payload(client, bad_payload):
+    r = client.post("/api/board/op",
+                    json={"decision_id": "d1", "kind": "cast_approval", "payload": bad_payload})
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "BAD_PAYLOAD"
+
+def test_board_routes_return_503_when_board_env_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("YIGDESK_SCENARIO", raising=False)   # no seeded board env
+    client = create_app(runtime_dir=tmp_path).test_client()
+    got = client.get("/api/board")
+    assert got.status_code == 503
+    assert got.get_json()["code"] == "BOARD_NOT_CONFIGURED"
+    posted = client.post("/api/board/op",
+                         json={"decision_id": "d1", "kind": "request_resolve", "payload": {}})
+    assert posted.status_code == 503
+    assert posted.get_json()["code"] == "BOARD_NOT_CONFIGURED"
+
+@pytest.fixture
+def hs_client(tmp_path, monkeypatch):
+    scn = _scenario(tmp_path)
+    ledger = tmp_path / "board.jsonl"
+    monkeypatch.setenv("YIGDESK_SCENARIO", str(scn))
+    monkeypatch.setenv("YIGDESK_LEDGER", str(ledger))
+    bb = build_blackboard(scn, ledger)
+    bb.open_decision("d1", "Approve the discount?", "council_discount", HS_POLICY,
+                     actor="agent:mcp", role="owner")
+    # c1 (discount 2) has the higher headroom; c2 (discount 5) is the human's pick.
+    bb.propose_candidate("d1", "c1", {"overrides": {"discount": 2}}, actor="finance", role="proposer")
+    bb.propose_candidate("d1", "c2", {"overrides": {"discount": 5}}, actor="finance", role="proposer")
+    bb.post_claim("d1", "k1", "risk", "c1", "cogs may rise", ["Deal Inputs!B4"], actor="risk", role="critic")
+    return create_app(runtime_dir=tmp_path).test_client()
+
+def test_human_selected_requires_scope_and_resolves_to_the_approved_candidate(hs_client):
+    board = hs_client.get("/api/board").get_json()["decisions"]["d1"]
+    assert board["candidates"]["c1"]["consequence"]["verdict"] == "ok"   # max-headroom candidate
+    assert board["candidates"]["c2"]["consequence"]["verdict"] == "ok"
+    # decision-scoped approve is rejected: human_selected demands a candidate scope
+    rej = hs_client.post("/api/board/op", json={"decision_id": "d1", "kind": "cast_approval",
+        "payload": {"verdict": "approve", "scope": "d1", "role": "cfo"}})
+    assert rej.status_code == 400
+    assert rej.get_json()["code"] == "SELECTION_REQUIRED"
+    # candidate-scoped approve on c2 (NOT the max-headroom c1) succeeds
+    ok = hs_client.post("/api/board/op", json={"decision_id": "d1", "kind": "cast_approval",
+        "payload": {"verdict": "approve", "scope": "c2", "role": "cfo"}}).get_json()
+    assert ok["result"] is None
+    # resolve commits the human-selected candidate, not the policy-max one
+    done = hs_client.post("/api/board/op", json={"decision_id": "d1", "kind": "request_resolve",
+        "payload": {}}).get_json()
+    assert done["result"]["record"]["chosen_candidate_id"] == "c2"
+    assert done["result"]["record"]["closed_by"] == "human"

@@ -255,9 +255,19 @@ def create_app(
     HUMAN_OPS = {"cast_approval", "request_resolve"}
     VERDICTS = {"approve", "hold", "reject"}
 
+    def _board_or_503():
+        try:
+            return build_blackboard_from_env(), None
+        except (KeyError, FileNotFoundError):
+            return None, (jsonify({"code": "BOARD_NOT_CONFIGURED",
+                                   "error": "set YIGDESK_SCENARIO to a built scenario"}), 503)
+
     @app.get("/api/board")
     def get_board():
-        return jsonify(board_dict(build_blackboard_from_env().project()))
+        bb, err = _board_or_503()
+        if err:
+            return err
+        return jsonify(board_dict(bb.project()))
 
     @app.post("/api/board/op")
     def board_op():
@@ -266,10 +276,15 @@ def create_app(
             return jsonify({"code": "INVALID_REQUEST", "error": "JSON object required"}), 400
         kind = body.get("kind")
         decision_id = body.get("decision_id")
-        payload = body.get("payload") or {}
+        payload = body.get("payload")
+        if payload is not None and not isinstance(payload, dict):
+            return jsonify({"code": "BAD_PAYLOAD", "error": "payload must be an object"}), 400
+        payload = payload or {}
         if kind not in HUMAN_OPS:
             return jsonify({"code": "OP_NOT_ALLOWED", "error": "kind must be cast_approval or request_resolve"}), 400
-        bb = build_blackboard_from_env()
+        bb, err = _board_or_503()
+        if err:
+            return err
         d = bb.project().decisions.get(decision_id)
         if d is None:
             return jsonify({"code": "UNKNOWN_DECISION", "error": "no such decision"}), 400
