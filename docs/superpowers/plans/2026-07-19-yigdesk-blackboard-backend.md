@@ -38,7 +38,14 @@ tests/
   test_gate.py test_blackboard.py test_determinism_conformance.py test_mcp_protocol.py test_boundary.py
 ```
 
-**Deleted with no traces (spec §8/§9):** `yigdesk/engine.py` (hardcoded formulas → data), `yigdesk/mcp_tools.py`, `yigdesk/cli.py` (single-flow), the `/api/analyze` path in `yigdesk/app.py`, `docs/OPEN_CORE_BOUNDARY.md`, old `tests/test_api.py` / `tests/test_engine.py` / `tests/test_mcp_tools.py` and the old `tests/test_mcp_protocol.py` contract.
+> **REVISION 2026-07-19 (see spec §13):** This plan is now **purely ADDITIVE**. The repo
+> contains a Codex Council/A2A subsystem being **integrated & reused**, so nothing is deleted
+> or migrated here — the existing council + demo stay green throughout. **Task 0's demolition
+> is cancelled**; scaffolding is folded into the tasks that need it. The new blackboard MCP
+> server is a **new module `yigdesk/blackboard_mcp.py`** (the old `mcp_server.py` is untouched
+> until Plan 2). `workbook.py` gets `read_cell` **added** (not replaced). `engine.py`,
+> `importer.py`, `session.py`, `benchmark.py`, `agent.py` are **untouched** in Plan 1. All
+> deletion + council migration is **Plan 2** (written after Plan 1 lands).
 
 ---
 

@@ -195,3 +195,45 @@ not the core), and determinism is a discipline achievable in Python. The Core's 
 + conformance suite keep a later **Rust reimplementation of the Core alone** a clean drop-in if
 a concrete trigger appears (embeddable single-binary kernel / stronger audit guarantees / the
 core becoming CPU-bound).
+
+## 13. Council/A2A integration (revision — 2026-07-19)
+
+Discovery after Task 0: the repo already contains a **Codex Council / A2A** subsystem
+(`session.py`, `agent.py`, `a2a.py`, `benchmark.py`, `importer.py` + `.codex/agents/*.toml`
++ `.agents/skills/yigdesk-council/SKILL.md` + tests) that overlaps this design and was a
+blind spot in §1–§12. Decision: **integrate & reuse** — the blackboard is the deterministic
+core; the council becomes its flagship Domain App.
+
+Its structural gap is exactly what this design fills: today the council produces **no
+persisted decision** — only a side-channel tool-call audit that is *verified* post-hoc as a
+proxy for "grounded," and an LLM (`decision_optimizer`) picks the winner. The blackboard makes
+the decision a real, deterministic, audited `DecisionRecord`, and the **close becomes a pure
+function** (D4) — the optimizer becomes advisory.
+
+**Concept mapping:** `evaluate_proposal` result → **Candidate**; boundary proposals →
+**Candidates**; `risk_challenger` stress/critique → **Claim** (`type=risk`); `actor` → Op
+actor/role; audit JSONL → the **Op ledger**; optimizer's pick → split into a non-binding
+advisory Claim **plus** the deterministic gate close; `compare_proposals` → `read_board`;
+`list_missing_evidence` → subsumed by D3 (incomplete evidence → candidate `hold`).
+
+**Reuse:** `engine.py` pricing machinery (→ ExpressionEvaluator); `importer.py` + `session.py`
+(upload XLSX → safe-parsed → immutable revision = the `source` behind `open_decision`); the 4
+role personas + `.codex` config (rewritten to the 6 ops); `benchmark.py` + `agent.py`
+(rewritten onto the 6 ops — the "bare Codex vs Yigdesk" comparison is kept).
+
+**Retire:** `a2a.py` bespoke verifier → ledger + D3 + one Policy ("resolve requires ≥1 grounded
+risk claim"); `mcp_tools.py` (dead); the single-flow `/api/analyze` + fixed 3-tool server;
+`engine.py`'s hardcoded formulas → data.
+
+**Decisions (2026-07-19):** upload→source = reuse importer+session; Flow-A proof + benchmark =
+rewrite onto the 6 ops; a2a verifier = retire → ledger + D3 + Policy.
+
+**Sequencing (supersedes §8's single-plan demolition):**
+- **Plan 1 — additive backend** (`plans/2026-07-19-yigdesk-blackboard-backend.md`): build
+  `core/` + `evaluator/` + a **new** blackboard MCP server module + scenarios + determinism &
+  boundary tests + doc cleanup, **without deleting or migrating any council code**. The
+  existing council + demo stay green throughout. (No demolition — §8's delete-map moves to Plan 2.)
+- **Plan 2 — council migration + demolition** (written after Plan 1 lands): rewrite
+  personas/SKILL/.codex to the 6 ops; migrate the pricer to model-from-data; wire
+  importer+session as upload→source; retire a2a → Policy; rewrite benchmark/agent onto the 6
+  ops; delete the now-obsolete old surface; rewrite affected tests. Each step green.
