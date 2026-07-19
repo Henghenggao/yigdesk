@@ -1,17 +1,30 @@
 from pathlib import Path
+from io import BytesIO
 import threading
 import time
 
 import yigdesk.app as app_module
-from yigdesk.agent import AgentExecutionError
+from yigdesk.agent import AgentExecutionError, AgentVerificationError
 from yigdesk.app import create_app
 from yigdesk.workbook import create_workbook, fingerprint
+from scripts.generate_sample_workbook import generate
 
 
 class FakeCodexRunner:
     model = "gpt-test"
 
-    def run(self, packet, *, base_url, revision_id=None):
+    def run(self, packet, *, base_url, revision_id=None, progress_callback=None):
+        if progress_callback is not None:
+            progress_callback("sensitive raw runner event")
+            progress_callback(
+                {
+                    "phase": "starting_codex",
+                    "elapsed_ms": 4,
+                    "stderr": "sensitive stderr must not cross the API boundary",
+                }
+            )
+            progress_callback({"phase": "calling_yigdesk_tools", "elapsed_ms": 8})
+            progress_callback({"phase": "verifying_result", "elapsed_ms": 11})
         consequence = packet["consequence"]
         return {
             "verified": True,
@@ -42,8 +55,14 @@ class FakeCodexRunner:
 class FailingCodexRunner:
     model = "gpt-test"
 
-    def run(self, packet, *, base_url, revision_id=None):
-        raise AgentExecutionError("sensitive path C:\\private\\codex-auth.json")
+    def run(self, packet, *, base_url, revision_id=None, progress_callback=None):
+        if progress_callback is not None:
+            progress_callback({"phase": "starting_codex", "elapsed_ms": 5})
+            progress_callback({"phase": "calling_yigdesk_tools", "elapsed_ms": 22})
+        error = AgentExecutionError("sensitive path C:\\private\\codex-auth.json")
+        error.phase = "starting_codex"
+        error.elapsed_ms = 23
+        raise error
 
 
 class BlockingCodexRunner(FakeCodexRunner):
@@ -52,17 +71,37 @@ class BlockingCodexRunner(FakeCodexRunner):
         self.release = threading.Event()
         self.revision_id = None
 
-    def run(self, packet, *, base_url, revision_id=None):
+    def run(self, packet, *, base_url, revision_id=None, progress_callback=None):
         self.revision_id = revision_id
         self.started.set()
         assert self.release.wait(timeout=2)
-        return super().run(packet, base_url=base_url, revision_id=revision_id)
+        return super().run(
+            packet,
+            base_url=base_url,
+            revision_id=revision_id,
+            progress_callback=progress_callback,
+        )
+
+
+class VerificationFailingRunner:
+    model = "gpt-test"
+
+    def run(self, packet, *, base_url, revision_id=None, progress_callback=None):
+        raise AgentVerificationError(
+            "sensitive verifier detail",
+            code="AGENT_EVIDENCE_MISMATCH",
+        )
 
 
 def make_client(tmp_path: Path):
     app = create_app(runtime_dir=tmp_path / "runtime")
     app.config.update(TESTING=True)
     return app, app.test_client()
+
+
+def agent_run_headers(client):
+    agent = client.get("/api/state").get_json()["agent"]
+    return {"X-Yigdesk-Agent-Token": agent["request_token"]}
 
 
 def test_analysis_is_byte_read_only_and_declares_demo_adapter_scope(tmp_path):
@@ -155,7 +194,12 @@ def test_agent_run_is_explicitly_unavailable_without_codex_configuration(tmp_pat
     state = client.get("/api/state").get_json()
     response = client.post("/api/agent-runs", json={})
 
-    assert state["agent"] == {"available": False, "mode": "local-preview", "model": None}
+    assert state["agent"] == {
+        "available": False,
+        "mode": "local-preview",
+        "model": None,
+        "reasoning_effort": None,
+    }
     assert response.status_code == 503
     assert response.get_json()["code"] == "CODEX_UNAVAILABLE"
 
@@ -167,8 +211,9 @@ def test_agent_run_returns_engine_packet_and_verified_codex_trace(tmp_path):
         agent_runner=FakeCodexRunner(),
     )
     client = app.test_client()
+    headers = agent_run_headers(client)
 
-    created = client.post("/api/agent-runs", json={})
+    created = client.post("/api/agent-runs", json={}, headers=headers)
     assert created.status_code == 202
     run_id = created.get_json()["run_id"]
 
@@ -188,7 +233,14 @@ def test_agent_run_returns_engine_packet_and_verified_codex_trace(tmp_path):
         "preview_consequence",
         "inspect_evidence",
     ]
-    limited = client.post("/api/agent-runs", json={})
+    assert run["progress"] == [
+        {"phase": "starting_codex", "elapsed_ms": 0},
+        {"phase": "starting_codex", "elapsed_ms": 4},
+        {"phase": "calling_yigdesk_tools", "elapsed_ms": 8},
+        {"phase": "verifying_result", "elapsed_ms": 11},
+    ]
+    assert "sensitive" not in str(run)
+    limited = client.post("/api/agent-runs", json={}, headers=headers)
     assert limited.status_code == 429
     assert limited.get_json()["code"] == "AGENT_RATE_LIMITED"
 
@@ -201,12 +253,16 @@ def test_agent_run_uses_one_immutable_revision_while_live_state_changes(tmp_path
         agent_runner=runner,
     )
     client = app.test_client()
+    agent_headers = agent_run_headers(client)
 
-    created = client.post("/api/agent-runs", json={})
+    created = client.post("/api/agent-runs", json={}, headers=agent_headers)
     assert created.status_code == 202
     run_id = created.get_json()["run_id"]
     revision_id = created.get_json()["revision_id"]
     assert runner.started.wait(timeout=1)
+    pending = client.get(f"/api/agent-runs/{run_id}").get_json()
+    assert pending["stage"] == "starting_codex"
+    assert pending["progress"] == [{"phase": "starting_codex", "elapsed_ms": 0}]
 
     reset = client.post("/api/reset", json={"scenario_id": "hold"})
     assert reset.status_code == 200
@@ -256,6 +312,7 @@ def test_agent_snapshot_parses_packet_and_workbook_from_one_captured_byte_revisi
     )
     client = app.test_client()
     state = app.config["YIGDESK_STATE"]
+    headers = agent_run_headers(client)
     original_workbook_snapshot = app_module.workbook_snapshot
     mutated = False
 
@@ -272,7 +329,7 @@ def test_agent_snapshot_parses_packet_and_workbook_from_one_captured_byte_revisi
         mutate_live_workbook_before_snapshot_parse,
     )
 
-    created = client.post("/api/agent-runs", json={})
+    created = client.post("/api/agent-runs", json={}, headers=headers)
 
     assert created.status_code == 202
     revision_id = created.get_json()["revision_id"]
@@ -306,8 +363,9 @@ def test_agent_failure_response_never_exposes_internal_codex_diagnostics(tmp_pat
         agent_runner=FailingCodexRunner(),
     )
     client = app.test_client()
+    headers = agent_run_headers(client)
 
-    created = client.post("/api/agent-runs", json={})
+    created = client.post("/api/agent-runs", json={}, headers=headers)
     run_id = created.get_json()["run_id"]
     run = None
     for _ in range(50):
@@ -317,7 +375,169 @@ def test_agent_failure_response_never_exposes_internal_codex_diagnostics(tmp_pat
         time.sleep(0.01)
 
     assert run["error"] == {
-        "code": "AgentExecutionError",
+        "code": "AGENT_EXECUTION_FAILED",
         "message": "Codex did not produce a verified result.",
     }
+    assert run["failure_phase"] == "calling_yigdesk_tools"
+    assert run["elapsed_ms"] == 23
+    assert run["progress"] == [
+        {"phase": "starting_codex", "elapsed_ms": 0},
+        {"phase": "starting_codex", "elapsed_ms": 5},
+        {"phase": "calling_yigdesk_tools", "elapsed_ms": 22},
+    ]
     assert "private" not in str(run)
+
+
+def test_verification_failure_reports_the_verifying_phase_without_raw_detail(tmp_path):
+    app = create_app(
+        runtime_dir=tmp_path / "runtime",
+        agent_enabled=True,
+        agent_runner=VerificationFailingRunner(),
+    )
+    client = app.test_client()
+
+    created = client.post(
+        "/api/agent-runs",
+        json={},
+        headers=agent_run_headers(client),
+    )
+    run_id = created.get_json()["run_id"]
+    run = None
+    for _ in range(50):
+        run = client.get(f"/api/agent-runs/{run_id}").get_json()
+        if run["status"] == "failed":
+            break
+        time.sleep(0.01)
+
+    assert run["stage"] == "rejected"
+    assert run["failure_phase"] == "verifying_result"
+    assert run["elapsed_ms"] == 0
+    assert run["error"] == {
+        "code": "AGENT_EVIDENCE_MISMATCH",
+        "message": "Codex output did not pass Yigdesk verification.",
+    }
+    assert "sensitive" not in str(run)
+
+
+def test_agent_run_requires_same_origin_token_and_loopback_request(tmp_path):
+    app = create_app(
+        runtime_dir=tmp_path / "runtime",
+        agent_enabled=True,
+        agent_runner=BlockingCodexRunner(),
+    )
+    client = app.test_client()
+    headers = agent_run_headers(client)
+
+    missing_token = client.post("/api/agent-runs", json={})
+    remote_request = client.post(
+        "/api/agent-runs",
+        json={},
+        headers=headers,
+        environ_base={"REMOTE_ADDR": "203.0.113.9"},
+    )
+    public_host = client.post(
+        "/api/agent-runs",
+        json={},
+        headers=headers,
+        base_url="http://demo.example",
+    )
+
+    assert missing_token.status_code == 403
+    assert missing_token.get_json()["code"] == "AGENT_REQUEST_FORBIDDEN"
+    assert remote_request.status_code == 403
+    assert public_host.status_code == 403
+    assert app.config["YIGDESK_AGENT_RUNS"].active_id is None
+
+
+def test_uploaded_workbook_drives_live_scenario_and_source_proof(tmp_path):
+    app, client = make_client(tmp_path)
+    upload_path = generate(tmp_path / "northwind-upload.xlsx")
+    source_bytes = upload_path.read_bytes()
+
+    response = client.post(
+        "/api/upload",
+        data={
+            "workbook": (BytesIO(source_bytes), "northwind-upload.xlsx"),
+            "requested_discount_pct": "2",
+            "margin_floor_pct": "30",
+            "current_discount_pct": "0",
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["scenario_id"].startswith("upload-")
+    assert payload["scenario"]["list_arr_k"] == "14658.2"
+    assert payload["scenario"]["cogs_k"] == "10031.0"
+    assert payload["source"]["kind"] == "uploaded-synthetic-xlsx"
+    assert payload["source"]["extraction"]["revenue_cells"][0] == "P&L Report!D5"
+
+    packet = client.post("/api/analyze").get_json()["packet"]
+    assert packet["source_fingerprint"] == payload["source"]["sha256"]
+    assert packet["projection_fingerprint"] != packet["source_fingerprint"]
+    assert packet["analysis_bytes_unchanged"] is True
+    assert packet["consequence"]["display"] == {
+        "net_arr": "$14,365k",
+        "arr_impact": "-$293k",
+        "gross_profit": "$4,334k",
+        "gross_margin": "30.2%",
+        "headroom": "0.2%",
+        "requested_discount": "2.0%",
+    }
+    assert app.config["YIGDESK_STATE"].active_source_path.read_bytes() == source_bytes
+
+
+def test_proposal_tools_share_revision_and_catch_the_display_rounding_trap(tmp_path):
+    _, client = make_client(tmp_path)
+    upload_path = generate(tmp_path / "northwind-tools.xlsx")
+    uploaded = client.post(
+        "/api/upload",
+        data={
+            "workbook": (BytesIO(upload_path.read_bytes()), "northwind-tools.xlsx"),
+            "requested_discount_pct": "2",
+            "margin_floor_pct": "30",
+        },
+        content_type="multipart/form-data",
+    ).get_json()
+
+    evaluated = client.post(
+        "/api/proposals/evaluate", json={"requested_discount_pct": "2.24"}
+    ).get_json()
+    compared = client.post(
+        "/api/proposals/compare", json={"discounts_pct": ["2", "2.23", "2.24"]}
+    ).get_json()
+    boundary = client.get("/api/proposals/boundary?step_pct=0.01").get_json()
+    stressed = client.post(
+        "/api/proposals/stress-test",
+        json={"requested_discount_pct": "2", "cogs_change_pct": "5"},
+    ).get_json()
+    missing = client.get("/api/evidence/missing").get_json()
+
+    revisions = {
+        tuple(sorted(result["revision"].items()))
+        for result in (evaluated, compared, boundary, stressed, missing)
+    }
+    assert len(revisions) == 1
+    assert evaluated["revision"] == uploaded["revision"]
+    assert evaluated["proposal"]["display"]["gross_margin"] == "30.0%"
+    assert evaluated["proposal"]["constraint_pass"] is False
+    assert boundary["boundary"]["largest_safe_step_pct"] == "2.23"
+    assert compared["comparison"]["highest_feasible_proposal_pct"] == "2.23"
+    assert stressed["stress_test"]["proposal"]["verdict"] == "HOLD"
+    assert missing["status"] == "COMPLETE"
+
+
+def test_upload_rejects_non_xlsx_without_replacing_current_revision(tmp_path):
+    _, client = make_client(tmp_path)
+    before = client.get("/api/state").get_json()["revision"]
+
+    response = client.post(
+        "/api/upload",
+        data={"workbook": (BytesIO(b"not an xlsx"), "notes.txt")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "UNSUPPORTED_FILE_TYPE"
+    assert client.get("/api/state").get_json()["revision"] == before

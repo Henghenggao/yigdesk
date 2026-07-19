@@ -19,7 +19,10 @@ from werkzeug.serving import make_server
 
 from .agent import (
     DEFAULT_MODEL,
+    DEFAULT_REASONING_EFFORT,
     AgentExecutionError,
+    AgentVerificationError,
+    SUPPORTED_REASONING_EFFORTS,
     _codex_isolation_args,
     _codex_environment,
     _execute,
@@ -32,7 +35,31 @@ from .mcp_tools import YigdeskToolClient
 
 
 METRIC_FIELDS = ("net_arr", "arr_impact", "gross_margin", "headroom")
+REQUEST_FIELDS = (
+    "requester",
+    "requester_role",
+    "recipient",
+    "sent_at",
+    "subject",
+    "message",
+)
+_REQUEST_DEFAULTS = {
+    "requester": "Private requester",
+    "requester_role": "Request owner",
+    "recipient": "Private reviewer",
+    "sent_at": "Private case",
+    "subject": "Private consequence review",
+    "message": "Review the supplied private case.",
+}
+INPUT_FIELDS = (
+    "list_arr_k",
+    "current_discount_pct",
+    "requested_discount_pct",
+    "cogs_k",
+    "margin_floor_pct",
+)
 VALID_VERDICTS = frozenset(("READY FOR CFO", "HOLD"))
+UNAVAILABLE = "Unavailable"
 DISPLAY_RESOLUTION = {
     "net_arr": (Decimal("1"), ROUND_HALF_EVEN),
     "arr_impact": (Decimal("1"), ROUND_HALF_EVEN),
@@ -56,11 +83,20 @@ class BareCodexRunner:
         self,
         *,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         timeout: float = 120,
         executor=None,
         temp_root: Path | None = None,
     ) -> None:
         self.model = model or os.environ.get("YIGDESK_CODEX_MODEL", DEFAULT_MODEL)
+        self.reasoning_effort = reasoning_effort or os.environ.get(
+            "YIGDESK_CODEX_REASONING_EFFORT", DEFAULT_REASONING_EFFORT
+        )
+        if self.reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
+            raise ValueError(
+                "Codex reasoning effort must be one of: "
+                + ", ".join(sorted(SUPPORTED_REASONING_EFFORTS))
+            )
         self.timeout = timeout
         self.executor = executor or _execute
         self.temp_root = temp_root
@@ -79,6 +115,8 @@ class BareCodexRunner:
                 *_codex_isolation_args(workspace),
                 "--model",
                 self.model,
+                "-c",
+                f"model_reasoning_effort={json.dumps(self.reasoning_effort)}",
                 "--output-schema",
                 str(BENCHMARK_SCHEMA),
                 "--output-last-message",
@@ -96,18 +134,28 @@ class BareCodexRunner:
                     input=_bare_prompt(case),
                 )
             except (OSError, subprocess.TimeoutExpired) as error:
-                raise AgentExecutionError("Bare Codex could not start or timed out.") from error
+                raise AgentExecutionError(
+                    "Bare Codex could not start or timed out.",
+                    code="BARE_AGENT_TIMEOUT",
+                ) from error
             latency_ms = round((time.perf_counter() - started) * 1000)
             if completed.returncode != 0:
-                raise AgentExecutionError("Bare Codex did not produce a schema-valid result.")
+                raise AgentExecutionError(
+                    "Bare Codex did not produce a schema-valid result.",
+                    code="BARE_AGENT_PROCESS_FAILED",
+                )
             try:
                 answer = json.loads(answer_path.read_text(encoding="utf-8"))
             except (FileNotFoundError, json.JSONDecodeError) as error:
-                raise AgentExecutionError("Bare Codex did not return schema-valid JSON.") from error
+                raise AgentExecutionError(
+                    "Bare Codex did not return schema-valid JSON.",
+                    code="BARE_AGENT_OUTPUT_INVALID",
+                ) from error
             trace = _read_codex_trace(completed.stdout)
             _verify_trace(trace, expected_mcp_tools=())
             return {
                 "model": self.model,
+                "reasoning_effort": self.reasoning_effort,
                 "thread_id": trace["thread_id"],
                 "latency_ms": latency_ms,
                 "usage": trace["usage"],
@@ -125,20 +173,27 @@ def load_case(path: Path) -> dict[str, Any]:
     for field in ("case_id", "request", "inputs", "gold"):
         if field not in case:
             raise ValueError(f"Case is missing required field: {field}")
-    if not isinstance(case["case_id"], str) or not case["case_id"].strip():
-        raise ValueError("Case id must be a non-empty string.")
+    if not isinstance(case["case_id"], str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", case["case_id"]
+    ):
+        raise ValueError("Case id must be a safe filesystem slug.")
     if not isinstance(case["request"], dict):
         raise ValueError("Case request must be an object.")
+    unsupported_request = sorted(set(case["request"]) - set(REQUEST_FIELDS))
+    if unsupported_request:
+        raise ValueError(
+            f"Case has unsupported request fields: {', '.join(unsupported_request)}"
+        )
+    for field, value in case["request"].items():
+        if not isinstance(value, str):
+            raise ValueError(f"Case request field {field} must be a string.")
     inputs = case["inputs"]
     if not isinstance(inputs, dict):
         raise ValueError("Case inputs must be an object.")
-    for field in (
-        "list_arr_k",
-        "current_discount_pct",
-        "requested_discount_pct",
-        "cogs_k",
-        "margin_floor_pct",
-    ):
+    unsupported_inputs = sorted(set(inputs) - set(INPUT_FIELDS))
+    if unsupported_inputs:
+        raise ValueError(f"Case has unsupported input fields: {', '.join(unsupported_inputs)}")
+    for field in INPUT_FIELDS:
         if field not in inputs:
             raise ValueError(f"Case inputs are missing required field: {field}")
         value = inputs[field]
@@ -155,12 +210,28 @@ def load_case(path: Path) -> dict[str, Any]:
         raise ValueError("Case gold verdict must be READY FOR CFO or HOLD.")
     if not isinstance(gold["metrics"], dict):
         raise ValueError("Case gold metrics must be an object.")
+    proposed_net_arr = (
+        Decimal(str(inputs["list_arr_k"]))
+        * (Decimal("1") - Decimal(str(inputs["requested_discount_pct"])) / 100)
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    margin_unavailable = inputs["cogs_k"] is None or proposed_net_arr == 0
     for field in METRIC_FIELDS:
         if field not in gold["metrics"]:
             raise ValueError(f"Case gold metrics are missing required field: {field}")
         value = gold["metrics"][field]
         if not isinstance(value, str):
             raise ValueError(f"Case gold metric {field} must be a string with an explicit unit.")
+        unavailable = value == UNAVAILABLE
+        should_be_unavailable = margin_unavailable and field in {
+            "gross_margin",
+            "headroom",
+        }
+        if unavailable or should_be_unavailable:
+            if gold["verdict"] != "HOLD" or unavailable != should_be_unavailable:
+                raise ValueError(
+                    f"Case gold metric {field} must use {UNAVAILABLE} only for an undefined-margin HOLD."
+                )
+            continue
         try:
             _normalized_metric(field, value)
         except (ValueError, InvalidOperation) as error:
@@ -169,17 +240,16 @@ def load_case(path: Path) -> dict[str, Any]:
 
 
 def scenario_from_case(case: dict[str, Any]) -> dict[str, Any]:
-    request = case["request"]
     inputs = case["inputs"]
     return {
-        "requester": request.get("requester", "Private requester"),
-        "requester_role": request.get("requester_role", "Request owner"),
-        "recipient": request.get("recipient", "Private reviewer"),
-        "sent_at": request.get("sent_at", "Private case"),
-        "subject": request.get("subject", "Private consequence review"),
-        "message": request.get("message", "Review the supplied private case."),
-        **{field: inputs[field] for field in inputs},
+        **_request_projection(case),
+        **{field: inputs[field] for field in INPUT_FIELDS},
     }
+
+
+def _request_projection(case: dict[str, Any]) -> dict[str, str]:
+    request = case["request"]
+    return {field: request.get(field, _REQUEST_DEFAULTS[field]) for field in REQUEST_FIELDS}
 
 
 def score_answer(answer: dict[str, Any], gold: dict[str, Any]) -> dict[str, Any]:
@@ -210,6 +280,8 @@ def score_answer(answer: dict[str, Any], gold: dict[str, Any]) -> dict[str, Any]
 def _metric_matches(field: str, actual: Any, expected: str) -> bool:
     if not isinstance(actual, str):
         return False
+    if expected == UNAVAILABLE:
+        return actual.strip().casefold() == UNAVAILABLE.casefold()
     try:
         quantum, rounding = DISPLAY_RESOLUTION[field]
         actual_value = _normalized_metric(field, actual).quantize(quantum, rounding=rounding)
@@ -269,15 +341,22 @@ def run_comparison(
     bare_runner: Any | None = None,
     assisted_runner: Any | None = None,
 ) -> dict[str, Any]:
-    if runs < 1:
-        raise ValueError("runs must be at least one")
+    if type(runs) is not int or runs < 1:
+        raise ValueError("runs must be a positive integer")
     bare_runner = bare_runner or BareCodexRunner()
     from .agent import CodexRunner
     from .app import _capture_agent_snapshot, create_app
 
-    assisted_runner = assisted_runner or CodexRunner(model=bare_runner.model)
+    assisted_runner = assisted_runner or CodexRunner(
+        model=bare_runner.model,
+        reasoning_effort=bare_runner.reasoning_effort,
+    )
     if getattr(bare_runner, "model", None) != getattr(assisted_runner, "model", None):
         raise ValueError("Bare and assisted runners must use the same model.")
+    if getattr(bare_runner, "reasoning_effort", None) != getattr(
+        assisted_runner, "reasoning_effort", None
+    ):
+        raise ValueError("Bare and assisted runners must use the same reasoning effort.")
 
     records: dict[str, list[dict[str, Any]]] = {"bare": [], "assisted": []}
     with tempfile.TemporaryDirectory(prefix="yigdesk-comparison-") as directory:
@@ -329,7 +408,7 @@ def run_comparison(
                                 "latency_ms": round((time.perf_counter() - trial_started) * 1000),
                                 "usage": {},
                             },
-                            "error": {"type": type(error).__name__},
+                            "error": _safe_error_summary(error),
                         }
                     records[mode].append(record)
         finally:
@@ -341,7 +420,13 @@ def run_comparison(
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "case_id": case["case_id"],
         "model": getattr(bare_runner, "model", None),
+        "reasoning_effort": getattr(bare_runner, "reasoning_effort", None),
         "runs_per_mode": runs,
+        "order_balance": {
+            "protocol": "alternating AB/BA",
+            "complete": runs % 2 == 0,
+            "recommended_minimum_even_runs": 4,
+        },
         "scoring_contract": SCORING_CONTRACT,
         "engine_vs_gold": score_answer(
             {
@@ -357,7 +442,7 @@ def run_comparison(
         "aggregate": {mode: _aggregate(items) for mode, items in records.items()},
         "privacy": {
             "source_content_included": False,
-            "report_fields": "case id, model, performance, verdict, metrics, proof hashes, tool names",
+            "report_fields": "case id, model, reasoning effort, performance, verdict, metrics, proof hashes, tool names",
         },
     }
     output_dir = Path(output_dir)
@@ -367,6 +452,16 @@ def run_comparison(
     )
     (output_dir / "comparison.md").write_text(_markdown_report(report), encoding="utf-8")
     return report
+
+
+def _safe_error_summary(error: Exception) -> dict[str, str]:
+    """Retain only allowlisted agent failure metadata in benchmark artifacts."""
+
+    if isinstance(error, AgentVerificationError):
+        return {"type": "AgentVerificationError", "code": error.code}
+    if isinstance(error, AgentExecutionError):
+        return {"type": "AgentExecutionError", "code": error.code}
+    return {"type": "AgentFailure"}
 
 
 def _comparison_record(
@@ -449,6 +544,8 @@ Case: `{report['case_id']}`
 
 Model: `{report['model']}`
 
+Reasoning effort: `{report['reasoning_effort']}`
+
 Runs per mode: `{report['runs_per_mode']}`
 
 Semantic scoring: money is normalized to whole USD-thousands with
@@ -479,7 +576,7 @@ def _percent(value: float | None) -> str:
 
 def _bare_prompt(case: dict[str, Any]) -> str:
     source = {
-        "request": case["request"],
+        "request": _request_projection(case),
         "inputs": case["inputs"],
         "formula_definitions": {
             "net_arr": "list_arr_k * (1 - discount_pct / 100)",
@@ -507,6 +604,9 @@ Use this calculation and rounding contract, which is also used by the reference 
 - Display money at whole-k resolution using ROUND_HALF_EVEN and percentages at one decimal.
   Additional correct precision is allowed; scoring normalizes numeric values to these final
   display resolutions while reporting literal display-format consistency separately.
+- When cost evidence is missing or proposed net ARR is zero, return HOLD and use the
+  literal string Unavailable for gross margin and headroom. Never invent, repair, or
+  divide by a missing or zero value.
 
 UNTRUSTED CASE DATA:
 """ + json.dumps(source, ensure_ascii=False, sort_keys=True)

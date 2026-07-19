@@ -30,7 +30,30 @@
     <main>
       <section class="hero" aria-labelledby="page-title">
         <h1 id="page-title">See the consequence before the agent acts.</h1>
-        <p class="hero-copy">A forwarded discount request becomes a workbook-backed preview — every figure binds to an exact source cell, or the verdict is an honest HOLD. Read-only; no business write-back.</p>
+        <p class="hero-copy">Upload a generated synthetic workbook, trace the real FY2024 cells, and give Codex agents one immutable decision surface. Exact evidence wins; missing evidence ends in HOLD.</p>
+      </section>
+
+      <section class="ingest-panel" aria-labelledby="ingest-heading">
+        <div class="ingest-intro">
+          <span class="section-index">00</span>
+          <div>
+            <p class="eyebrow">Live evidence intake</p>
+            <h2 id="ingest-heading">Bring the workbook. Keep the bytes.</h2>
+            <p>Macro-free XLSX · generated synthetic data only · 8 MB maximum · no source write-back</p>
+          </div>
+        </div>
+        <form id="upload-form" class="upload-form" enctype="multipart/form-data">
+          <label class="file-drop" for="workbook-upload">
+            <input id="workbook-upload" name="workbook" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required />
+            <span class="drop-mark" aria-hidden="true">↥</span>
+            <span><strong id="upload-file-label">Choose synthetic FY2024 workbook</strong><small id="upload-file-meta">The browser sends the selected file to this local demo process.</small></span>
+          </label>
+          <label class="compact-field"><span>Requested discount</span><span><input id="requested-discount" name="requested_discount_pct" type="number" min="0" max="100" step="0.01" value="2.00" required />%</span></label>
+          <label class="compact-field"><span>Margin floor</span><span><input id="margin-floor" name="margin_floor_pct" type="number" min="0" max="100" step="0.01" value="30.00" required />%</span></label>
+          <input name="current_discount_pct" type="hidden" value="0" />
+          <button class="upload-action" id="upload-action" type="submit"><span>Parse + bind revision</span><span aria-hidden="true">→</span></button>
+        </form>
+        <p class="upload-status" id="upload-status" role="status" aria-live="polite">Or use the two built-in fixtures below.</p>
       </section>
 
       <section class="scenario-bar" aria-label="Demo scenario">
@@ -49,11 +72,18 @@
         </div>
       </section>
 
+      <ol class="process-strip" aria-label="Decision proof stages">
+        <li data-step="read"><span class="step-number">1</span><span class="step-label">Read<small>source bytes</small></span></li>
+        <li data-step="calculate"><span class="step-number">2</span><span class="step-label">Calculate<small>exact decimals</small></span></li>
+        <li data-step="trace"><span class="step-number">3</span><span class="step-label">Challenge<small>boundary + stress</small></span></li>
+        <li data-step="review"><span class="step-number">4</span><span class="step-label">Review<small>human decision</small></span></li>
+      </ol>
+
       <section class="workspace" id="workspace" aria-label="Consequence workspace">
         <article class="inbox-panel panel" aria-labelledby="inbox-heading">
           <header class="panel-heading">
             <div><span class="section-index">01</span><h2 id="inbox-heading">Forwarded request</h2></div>
-            <span class="source-pill">SYNTHETIC</span>
+            <span class="source-pill" id="source-pill">SYNTHETIC FIXTURE</span>
           </header>
           <div class="email-header">
             <div class="avatar" aria-hidden="true">ER</div>
@@ -68,8 +98,8 @@
           <p class="email-body" id="message"></p>
           <div class="attachment">
             <span class="sheet-icon" aria-hidden="true">X</span>
-            <span><strong>Northstar-renewal.xlsx</strong><small>2 sheets · generated synthetic fixture</small></span>
-            <span class="attachment-state">read only</span>
+            <span><strong id="attachment-name">Northstar-renewal.xlsx</strong><small id="attachment-meta">2 sheets · generated synthetic fixture</small></span>
+            <span class="attachment-state" id="attachment-state">read only</span>
           </div>
           <button type="button" class="primary-action" id="analyze" data-testid="analyze" aria-describedby="read-wall">
             <span class="action-label">Loading analysis mode…</span>
@@ -125,7 +155,7 @@
           </header>
           <div class="workbook-title">
             <span class="sheet-icon" aria-hidden="true">X</span>
-            <span><strong>Northstar renewal</strong><small id="fingerprint">sha256 · loading</small></span>
+            <span><strong id="workbook-name">Northstar renewal</strong><small id="fingerprint">sha256 · loading</small></span>
           </div>
           <yig-grid id="workbook-grid" aria-label="Read-only workbook view"></yig-grid>
           <section class="inspector-section" aria-labelledby="inspector-heading">
@@ -133,6 +163,27 @@
             <yig-model-inspector id="model-inspector"></yig-model-inspector>
           </section>
         </aside>
+      </section>
+
+      <section class="a2a-board" id="a2a-board" aria-labelledby="a2a-heading">
+        <header class="a2a-header">
+          <div>
+            <p class="eyebrow">Shared decision blackboard</p>
+            <h2 id="a2a-heading">One revision for every Codex agent.</h2>
+            <p id="a2a-intro">Run the consequence preview to expose proposal, boundary, rounding, and stress-test facts. These are deterministic tool results—not simulated agent dialogue.</p>
+          </div>
+          <span class="a2a-state" id="a2a-state">AWAITING PROOF</span>
+        </header>
+        <div class="a2a-scorecards" id="a2a-scorecards" hidden>
+          <article><span>Submitted proposal</span><strong id="board-requested">—</strong><small id="board-requested-note">not evaluated</small></article>
+          <article><span>Financial ceiling</span><strong id="board-boundary">—</strong><small id="board-boundary-note">exact floor pending</small></article>
+          <article class="challenge-card"><span>Rounding challenge</span><strong id="board-rounding">—</strong><small id="board-rounding-note">exact check pending</small></article>
+          <article><span>COGS +5% stress</span><strong id="board-stress">—</strong><small id="board-stress-note">not persistent</small></article>
+        </div>
+        <div class="a2a-footer">
+          <code id="board-revision">revision · pending</code>
+          <button type="button" id="copy-council" disabled>Copy real Codex council prompt <span aria-hidden="true">↗</span></button>
+        </div>
       </section>
 
       <section class="packet-export" id="packet-export" role="status" aria-live="polite" hidden>

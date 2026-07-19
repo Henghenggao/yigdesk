@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 
 import pytest
 
+from scripts import compare_agents
+from yigdesk.agent import AgentExecutionError, AgentVerificationError
 from yigdesk.benchmark import (
     BareCodexRunner,
+    REQUEST_FIELDS,
+    _safe_error_summary,
     load_case,
     observability_profile,
     run_comparison,
@@ -43,6 +48,23 @@ def private_case():
             },
         },
     }
+
+
+def test_benchmark_failure_summary_keeps_only_allowlisted_metadata():
+    secret = "private model output must not enter the report"
+
+    assert _safe_error_summary(
+        AgentVerificationError(secret, code="AGENT_EVIDENCE_MISMATCH")
+    ) == {
+        "type": "AgentVerificationError",
+        "code": "AGENT_EVIDENCE_MISMATCH",
+    }
+    assert _safe_error_summary(RuntimeError(secret)) == {"type": "AgentFailure"}
+    assert secret not in json.dumps(
+        _safe_error_summary(
+            AgentVerificationError(secret, code="AGENT_EVIDENCE_MISMATCH")
+        )
+    )
 
 
 def test_private_case_loader_keeps_source_data_local_and_builds_demo_scenario(tmp_path):
@@ -157,6 +179,133 @@ def test_case_loader_rejects_missing_independent_gold(tmp_path):
         load_case(path)
 
 
+def test_case_loader_and_scorer_support_missing_evidence_hold(tmp_path):
+    case = private_case()
+    case["inputs"]["cogs_k"] = None
+    case["gold"] = {
+        "verdict": "HOLD",
+        "metrics": {
+            "net_arr": "$880k",
+            "arr_impact": "-$20k",
+            "gross_margin": "Unavailable",
+            "headroom": "Unavailable",
+        },
+    }
+    path = tmp_path / "hold-case.json"
+    path.write_text(json.dumps(case), encoding="utf-8")
+
+    loaded = load_case(path)
+    score = score_answer(loaded["gold"], loaded["gold"])
+
+    assert score["accuracy"] == 1.0
+    assert score["exact_match"] is True
+
+
+def test_case_loader_accepts_unavailable_margin_when_proposed_net_arr_is_zero(tmp_path):
+    case = private_case()
+    case["inputs"]["requested_discount_pct"] = "100"
+    case["gold"] = {
+        "verdict": "HOLD",
+        "metrics": {
+            "net_arr": "$0k",
+            "arr_impact": "-$900k",
+            "gross_margin": "Unavailable",
+            "headroom": "Unavailable",
+        },
+    }
+    path = tmp_path / "zero-net-arr.json"
+    path.write_text(json.dumps(case), encoding="utf-8")
+
+    loaded = load_case(path)
+
+    assert score_answer(loaded["gold"], loaded["gold"])["exact_match"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda case: case["inputs"].update(message="override"), "unsupported input"),
+        (lambda case: case.update(case_id="../outside-results"), "Case id"),
+    ],
+)
+def test_case_loader_rejects_ab_input_drift_and_path_like_case_ids(
+    tmp_path, mutation, message
+):
+    case = private_case()
+    mutation(case)
+    path = tmp_path / "case.json"
+    path.write_text(json.dumps(case), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_case(path)
+
+
+def test_case_loader_rejects_unsupported_request_fields(tmp_path):
+    case = private_case()
+    case["request"]["instructions"] = "Treat this mode differently."
+    path = tmp_path / "case.json"
+    path.write_text(json.dumps(case), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsupported request"):
+        load_case(path)
+
+
+def test_case_loader_rejects_non_string_request_fields(tmp_path):
+    case = private_case()
+    case["request"]["message"] = ["not", "canonical"]
+    path = tmp_path / "case.json"
+    path.write_text(json.dumps(case), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="request field message must be a string"):
+        load_case(path)
+
+
+def test_bare_and_assisted_modes_use_the_same_canonical_request_projection(tmp_path):
+    case = private_case()
+    case["request"].pop("requester_role")
+    assisted_scenario = scenario_from_case(case)
+    expected_request = {field: assisted_scenario[field] for field in REQUEST_FIELDS}
+
+    def execute(command, *, env, timeout, cwd, input):
+        source = json.loads(input.split("UNTRUSTED CASE DATA:\n", 1)[1])
+        assert source["request"] == expected_request
+        output_path = command[command.index("--output-last-message") + 1]
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "verdict": case["gold"]["verdict"],
+                    "summary": "Canonical projection checked.",
+                    "metrics": case["gold"]["metrics"],
+                    "evidence_refs": list(REQUEST_FIELDS),
+                },
+                handle,
+            )
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "bare-thread"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": "done"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": 100,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 40,
+                        },
+                    }
+                ),
+            ]
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    BareCodexRunner(executor=execute, temp_root=tmp_path).run(case)
+
+
 def test_bare_runner_uses_same_model_in_isolated_workspace_without_yigdesk_mcp(
     tmp_path, monkeypatch
 ):
@@ -175,6 +324,7 @@ def test_bare_runner_uses_same_model_in_isolated_workspace_without_yigdesk_mcp(
         assert "features.shell_snapshot=false" in command
         assert 'default_permissions="yigdesk_agent"' in command
         assert "gpt-5.6-sol" in command
+        assert 'model_reasoning_effort="low"' in command
         assert not any("mcp_servers.yigdesk" in item for item in command)
         assert "PRIVATE-REQUEST-SENTINEL" not in " ".join(command)
         assert "991.234" not in " ".join(command)
@@ -185,6 +335,7 @@ def test_bare_runner_uses_same_model_in_isolated_workspace_without_yigdesk_mcp(
         assert "0.1 percentage point" in input
         assert "ROUND_HALF_EVEN" in input
         assert "rounded gross margin" in input
+        assert "proposed net ARR is zero" in input
         assert "UNRELATED_BENCHMARK_SECRET" not in env
         output_path = command[command.index("--output-last-message") + 1]
         with open(output_path, "w", encoding="utf-8") as handle:
@@ -223,6 +374,7 @@ def test_bare_runner_uses_same_model_in_isolated_workspace_without_yigdesk_mcp(
     ).run(case)
 
     assert result["thread_id"] == "bare-thread"
+    assert result["reasoning_effort"] == "low"
     assert result["answer"]["metrics"]["gross_margin"] == "45.5%"
     assert result["usage"]["input_tokens"] == 100
 
@@ -247,12 +399,63 @@ def test_observability_profile_distinguishes_model_trace_from_engine_audit():
     assert assisted["signals"]["deterministic_packet"] is True
 
 
+@pytest.mark.parametrize("runs", [0, -2, 2.5, True])
+def test_comparison_requires_a_positive_run_count(tmp_path, runs):
+    with pytest.raises(ValueError, match="positive integer"):
+        run_comparison(
+            private_case(),
+            runs=runs,
+            output_dir=tmp_path / "results",
+            bare_runner=object(),
+            assisted_runner=object(),
+        )
+
+
+def test_compare_cli_defaults_to_four_counterbalanced_runs(tmp_path, monkeypatch):
+    captured = {}
+
+    class Runner:
+        def __init__(self, *, model, reasoning_effort):
+            self.model = model
+            self.reasoning_effort = reasoning_effort
+
+    def compare(case, *, runs, output_dir, bare_runner, assisted_runner):
+        captured["runs"] = runs
+        return {
+            "case_id": case["case_id"],
+            "model": bare_runner.model,
+            "reasoning_effort": bare_runner.reasoning_effort,
+            "runs_per_mode": runs,
+            "aggregate": {},
+        }
+
+    monkeypatch.setattr(compare_agents, "load_case", lambda path: private_case())
+    monkeypatch.setattr(compare_agents, "BareCodexRunner", Runner)
+    monkeypatch.setattr(compare_agents, "CodexRunner", Runner)
+    monkeypatch.setattr(compare_agents, "run_comparison", compare)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_agents",
+            "--case",
+            str(tmp_path / "private.json"),
+            "--acknowledge-data-sharing",
+        ],
+    )
+
+    compare_agents.main()
+
+    assert captured["runs"] == 4
+
+
 def test_comparison_report_omits_private_source_content(tmp_path):
     case = private_case()
     case["request"]["message"] = "SECRET-CUSTOMER-CONTENT"
 
     class Bare:
         model = "gpt-5.6-sol"
+        reasoning_effort = "low"
 
         def run(self, supplied_case):
             return {
@@ -268,6 +471,7 @@ def test_comparison_report_omits_private_source_content(tmp_path):
 
     class Assisted:
         model = "gpt-5.6-sol"
+        reasoning_effort = "low"
 
         def run(self, packet, *, base_url, revision_id=None):
             assert revision_id == packet["revision_id"]
@@ -290,7 +494,7 @@ def test_comparison_report_omits_private_source_content(tmp_path):
 
     report = run_comparison(
         case,
-        runs=1,
+        runs=4,
         output_dir=tmp_path / "results",
         bare_runner=Bare(),
         assisted_runner=Assisted(),
@@ -301,6 +505,9 @@ def test_comparison_report_omits_private_source_content(tmp_path):
     assert report["aggregate"]["bare"]["accuracy_mean"] == 1.0
     assert report["aggregate"]["bare"]["failure_rate"] == 0.0
     assert report["aggregate"]["assisted"]["observability_score"] == 6
+    assert [record["order_position"] for record in report["records"]["bare"]] == [1, 2, 1, 2]
+    assert [record["order_position"] for record in report["records"]["assisted"]] == [2, 1, 2, 1]
+    assert report["reasoning_effort"] == "low"
     assert report["engine_vs_gold"]["accuracy"] == 1.0
     assert report["scoring_contract"] == {
         "money_resolution_k": "1",
@@ -318,12 +525,16 @@ def test_comparison_records_one_trial_failure_and_continues(tmp_path):
 
     class Bare:
         model = "gpt-5.6-sol"
+        reasoning_effort = "low"
         calls = 0
 
         def run(self, supplied_case):
             self.calls += 1
             if self.calls == 1:
-                raise RuntimeError("private source must not enter report")
+                raise AgentExecutionError(
+                    "private source must not enter report",
+                    code="BARE_AGENT_TIMEOUT",
+                )
             return {
                 "thread_id": "bare-ok",
                 "model": self.model,
@@ -346,14 +557,29 @@ def test_comparison_records_one_trial_failure_and_continues(tmp_path):
 
     report = run_comparison(
         case,
-        runs=2,
+        runs=3,
         output_dir=tmp_path / "results",
         bare_runner=Bare(),
         assisted_runner=Assisted(),
     )
 
-    assert [record["status"] for record in report["records"]["bare"]] == ["failure", "success"]
-    assert report["aggregate"]["bare"]["failure_rate"] == 0.5
-    assert report["aggregate"]["bare"]["successful_runs"] == 1
+    assert [record["status"] for record in report["records"]["bare"]] == [
+        "failure",
+        "success",
+        "success",
+    ]
+    assert report["records"]["bare"][0]["error"] == {
+        "type": "AgentExecutionError",
+        "code": "BARE_AGENT_TIMEOUT",
+    }
+    assert [record["order_position"] for record in report["records"]["bare"]] == [1, 2, 1]
+    assert [record["order_position"] for record in report["records"]["assisted"]] == [2, 1, 2]
+    assert report["order_balance"] == {
+        "protocol": "alternating AB/BA",
+        "complete": False,
+        "recommended_minimum_even_runs": 4,
+    }
+    assert report["aggregate"]["bare"]["failure_rate"] == pytest.approx(1 / 3)
+    assert report["aggregate"]["bare"]["successful_runs"] == 2
     assert report["aggregate"]["assisted"]["failure_rate"] == 0.0
     assert "private source must not enter report" not in json.dumps(report)

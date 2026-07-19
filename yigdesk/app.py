@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import secrets
@@ -10,18 +11,36 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from .agent import AgentExecutionError, AgentVerificationError, CodexRunner
-from .engine import evaluate
+from .engine import (
+    DealInputs,
+    compare_proposals,
+    evaluate,
+    evaluate_proposal,
+    find_feasible_boundary,
+    stress_test_cogs,
+)
+from .importer import (
+    MAX_UPLOAD_BYTES,
+    WorkbookImportError,
+    import_synthetic_workbook,
+    parse_decimal_field,
+)
 from .workbook import create_workbook, fingerprint, inspect_cell, read_inputs, workbook_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME = ROOT / "runtime"
+AGENT_PHASES = ("starting_codex", "calling_yigdesk_tools", "verifying_result")
+MAX_AGENT_PROGRESS_EVENTS = 12
 
 
 def _load_scenarios() -> dict[str, dict[str, Any]]:
@@ -36,6 +55,9 @@ class DemoState:
     scenarios: dict[str, dict[str, Any]] = field(default_factory=_load_scenarios)
     scenario_id: str = "ready"
     lock: threading.RLock = field(default_factory=threading.RLock)
+    current_scenario: dict[str, Any] = field(init=False)
+    active_source_path: Path = field(init=False)
+    source: dict[str, Any] = field(init=False)
 
     @property
     def workbook_path(self) -> Path:
@@ -47,6 +69,68 @@ class DemoState:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         create_workbook(self.workbook_path, self.scenarios[scenario_id])
         self.scenario_id = scenario_id
+        self.current_scenario = deepcopy(self.scenarios[scenario_id])
+        self.active_source_path = self.workbook_path
+        self.source = {
+            "kind": "generated-synthetic-fixture",
+            "filename": "Northstar-renewal.xlsx",
+            "size_bytes": self.workbook_path.stat().st_size,
+            "sha256": fingerprint(self.workbook_path),
+            "parser_version": "synthetic-five-formula-adapter/v1",
+            "synthetic_marker_verified": True,
+            "analysis_bytes_unchanged": True,
+            "sheet_names": ["Deal Inputs", "Deal Model"],
+            "extraction": {
+                "sheet": "Deal Inputs",
+                "revenue_cells": ["Deal Inputs!B2"],
+                "cogs_cells": ["Deal Inputs!B4"],
+                "revenue_k": self.current_scenario["list_arr_k"],
+                "cogs_k": self.current_scenario["cogs_k"],
+            },
+        }
+
+    def load_upload(
+        self,
+        *,
+        source_bytes: bytes,
+        original_filename: str,
+        requested_discount_pct,
+        margin_floor_pct,
+        current_discount_pct,
+    ) -> None:
+        """Validate one upload, then atomically make its derived revision current."""
+
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        candidate = self.runtime_dir / ("upload-candidate-" + secrets.token_hex(6) + ".xlsx")
+        candidate.write_bytes(source_bytes)
+        try:
+            imported = import_synthetic_workbook(
+                candidate,
+                original_filename=original_filename,
+                requested_discount_pct=requested_discount_pct,
+                margin_floor_pct=margin_floor_pct,
+                current_discount_pct=current_discount_pct,
+            )
+            projection = self.runtime_dir / ("projection-" + secrets.token_hex(6) + ".xlsx")
+            create_workbook(projection, imported.scenario)
+        except Exception:
+            candidate.unlink(missing_ok=True)
+            raise
+        previous_source = getattr(self, "active_source_path", None)
+        previous_projection = self.workbook_path if self.workbook_path.exists() else None
+        candidate.replace(self.runtime_dir / "uploaded-source.xlsx")
+        projection.replace(self.workbook_path)
+        if previous_source and previous_source not in {
+            self.workbook_path,
+            self.runtime_dir / "uploaded-source.xlsx",
+        }:
+            previous_source.unlink(missing_ok=True)
+        if previous_projection and previous_projection != self.workbook_path:
+            previous_projection.unlink(missing_ok=True)
+        self.active_source_path = self.runtime_dir / "uploaded-source.xlsx"
+        self.current_scenario = imported.scenario
+        self.source = {**imported.source, "sha256": fingerprint(self.active_source_path)}
+        self.scenario_id = "upload-" + self.source["sha256"][:12]
 
 
 @dataclass(frozen=True)
@@ -56,6 +140,7 @@ class AgentSnapshot:
     revision_id: str
     scenario_id: str
     scenario_json: str
+    source_bytes: bytes
     workbook_bytes: bytes
     workbook_json: str
     packet_json: str
@@ -97,7 +182,8 @@ class AgentRunStore:
             run = {
                 "run_id": run_id,
                 "status": "queued",
-                "stage": "reading_request",
+                "stage": "starting_codex",
+                "progress": [{"phase": "starting_codex", "elapsed_ms": 0}],
                 "created_at": now,
                 "updated_at": now,
                 "packet_id": packet["packet_id"],
@@ -109,6 +195,38 @@ class AgentRunStore:
             self.active_id = run_id
             self.last_created = time.monotonic()
             return deepcopy(run)
+
+    def record_progress(self, run_id: str, event: Any) -> None:
+        """Persist only ordered, bounded phase/timing evidence from the runner."""
+
+        if not isinstance(event, dict):
+            return
+        phase = event.get("phase")
+        elapsed_ms = event.get("elapsed_ms")
+        if (
+            phase not in AGENT_PHASES
+            or isinstance(elapsed_ms, bool)
+            or not isinstance(elapsed_ms, int)
+            or elapsed_ms < 0
+        ):
+            return
+        with self.lock:
+            run = self.runs[run_id]
+            progress = run["progress"]
+            previous = progress[-1]
+            if AGENT_PHASES.index(phase) < AGENT_PHASES.index(previous["phase"]):
+                return
+            if elapsed_ms < previous["elapsed_ms"]:
+                return
+            progress.append({"phase": phase, "elapsed_ms": elapsed_ms})
+            if len(progress) > MAX_AGENT_PROGRESS_EVENTS:
+                run["progress"] = [
+                    progress[0],
+                    *progress[-(MAX_AGENT_PROGRESS_EVENTS - 1) :],
+                ]
+            run["status"] = "running"
+            run["stage"] = phase
+            run["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     def update(self, run_id: str, **changes: Any) -> None:
         with self.lock:
@@ -142,6 +260,7 @@ def create_app(
     agent_runner: Any | None = None,
 ) -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="")
+    app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + (64 * 1024)
     state = DemoState(
         Path(runtime_dir or os.environ.get("YIGDESK_RUNTIME", DEFAULT_RUNTIME)),
         scenarios=scenarios or _load_scenarios(),
@@ -158,7 +277,12 @@ def create_app(
         "available": bool(configured and runner is not None),
         "mode": "codex-mcp" if configured and runner is not None else "local-preview",
         "model": getattr(runner, "model", None) if configured else None,
+        "reasoning_effort": (
+            getattr(runner, "reasoning_effort", None) if configured else None
+        ),
     }
+    if agent["available"]:
+        agent["request_token"] = secrets.token_urlsafe(32)
     agent_runs = AgentRunStore(
         cooldown_seconds=float(os.environ.get("YIGDESK_AGENT_COOLDOWN_SEC", "10"))
     )
@@ -177,6 +301,18 @@ def create_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
+    @app.errorhandler(RequestEntityTooLarge)
+    def upload_too_large(_error):
+        return (
+            jsonify(
+                {
+                    "code": "UPLOAD_TOO_LARGE",
+                    "error": f"Synthetic workbook uploads are limited to {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+                }
+            ),
+            413,
+        )
+
     @app.get("/")
     def index():
         return app.send_static_file("index.html")
@@ -194,8 +330,16 @@ def create_app(
                 {
                     "scenario_id": snapshot.scenario_id,
                     "scenario": snapshot.scenario(),
+                    "source": deepcopy(packet.get("source", {})),
                     "workbook": snapshot.workbook(),
                     "capabilities": ["read_view", "inspect", "preview_consequence"],
+                    "decision_capabilities": [
+                        "evaluate_proposal",
+                        "compare_proposals",
+                        "find_feasible_boundary",
+                        "stress_test_assumption",
+                        "list_missing_evidence",
+                    ],
                     "revision": _revision_fields(packet),
                     "agent": agent,
                 }
@@ -216,6 +360,54 @@ def create_app(
                 return jsonify(_state_payload(state, agent))
         except ValueError:
             return jsonify({"code": "UNKNOWN_SCENARIO", "error": "Choose ready or hold."}), 400
+
+    @app.post("/api/upload")
+    def upload_workbook():
+        uploaded = request.files.get("workbook")
+        if uploaded is None or not uploaded.filename:
+            return (
+                jsonify(
+                    {
+                        "code": "WORKBOOK_REQUIRED",
+                        "error": "Choose a generated synthetic .xlsx workbook.",
+                    }
+                ),
+                400,
+            )
+        source_bytes = uploaded.stream.read(MAX_UPLOAD_BYTES + 1)
+        if len(source_bytes) > MAX_UPLOAD_BYTES:
+            return (
+                jsonify(
+                    {
+                        "code": "UPLOAD_TOO_LARGE",
+                        "error": f"Synthetic workbook uploads are limited to {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+                    }
+                ),
+                413,
+            )
+        try:
+            requested_discount_pct = parse_decimal_field(
+                "requested_discount_pct",
+                request.form.get("requested_discount_pct", "2"),
+            )
+            margin_floor_pct = parse_decimal_field(
+                "margin_floor_pct", request.form.get("margin_floor_pct", "30")
+            )
+            current_discount_pct = parse_decimal_field(
+                "current_discount_pct",
+                request.form.get("current_discount_pct", "0"),
+            )
+            with state.lock:
+                state.load_upload(
+                    source_bytes=source_bytes,
+                    original_filename=uploaded.filename,
+                    requested_discount_pct=requested_discount_pct,
+                    margin_floor_pct=margin_floor_pct,
+                    current_discount_pct=current_discount_pct,
+                )
+                return jsonify(_state_payload(state, agent)), 201
+        except WorkbookImportError as error:
+            return jsonify({"code": error.code, "error": str(error)}), 400
 
     @app.get("/api/inspect")
     def inspect():
@@ -257,6 +449,108 @@ def create_app(
         with state.lock:
             return jsonify({"packet": _consequence_packet(state)})
 
+    @app.post("/api/proposals/evaluate")
+    def evaluate_one_proposal():
+        try:
+            body = _json_object()
+            discount = parse_decimal_field(
+                "requested_discount_pct", body.get("requested_discount_pct")
+            )
+            inputs, revision = _decision_inputs(state, agent_runs)
+            return jsonify(
+                {
+                    "proposal": evaluate_proposal(inputs, discount),
+                    "revision": revision,
+                }
+            )
+        except WorkbookImportError as error:
+            return jsonify({"code": error.code, "error": str(error)}), 400
+        except ValueError as error:
+            return jsonify({"code": "INVALID_REQUEST", "error": str(error)}), 400
+
+    @app.post("/api/proposals/compare")
+    def compare_candidate_proposals():
+        try:
+            body = _json_object()
+            raw_discounts = body.get("discounts_pct")
+            if not isinstance(raw_discounts, list) or not 2 <= len(raw_discounts) <= 12:
+                raise ValueError("discounts_pct must contain between 2 and 12 proposals")
+            discounts = [
+                parse_decimal_field("discounts_pct", raw) for raw in raw_discounts
+            ]
+            if len(set(discounts)) != len(discounts):
+                raise ValueError("discounts_pct must not contain duplicates")
+            inputs, revision = _decision_inputs(state, agent_runs)
+            return jsonify(
+                {
+                    "comparison": compare_proposals(inputs, discounts),
+                    "revision": revision,
+                }
+            )
+        except WorkbookImportError as error:
+            return jsonify({"code": error.code, "error": str(error)}), 400
+        except ValueError as error:
+            return jsonify({"code": "INVALID_REQUEST", "error": str(error)}), 400
+
+    @app.get("/api/proposals/boundary")
+    def get_proposal_boundary():
+        try:
+            step = parse_decimal_field("step_pct", request.args.get("step_pct", "0.01"))
+            inputs, revision = _decision_inputs(state, agent_runs)
+            return jsonify(
+                {
+                    "boundary": find_feasible_boundary(inputs, step),
+                    "revision": revision,
+                }
+            )
+        except (WorkbookImportError, ValueError) as error:
+            code = getattr(error, "code", "INVALID_REQUEST")
+            return jsonify({"code": code, "error": str(error)}), 400
+
+    @app.post("/api/proposals/stress-test")
+    def stress_test_proposal():
+        try:
+            body = _json_object()
+            discount = parse_decimal_field(
+                "requested_discount_pct", body.get("requested_discount_pct")
+            )
+            raw_change = body.get("cogs_change_pct")
+            try:
+                cogs_change = Decimal(str(raw_change).strip())
+            except (InvalidOperation, AttributeError, ValueError) as error:
+                raise ValueError("cogs_change_pct must be a decimal percentage") from error
+            inputs, revision = _decision_inputs(state, agent_runs)
+            return jsonify(
+                {
+                    "stress_test": stress_test_cogs(inputs, discount, cogs_change),
+                    "revision": revision,
+                }
+            )
+        except WorkbookImportError as error:
+            return jsonify({"code": error.code, "error": str(error)}), 400
+        except ValueError as error:
+            return jsonify({"code": "INVALID_REQUEST", "error": str(error)}), 400
+
+    @app.get("/api/evidence/missing")
+    def list_missing_evidence():
+        inputs, revision = _decision_inputs(state, agent_runs)
+        missing = []
+        if inputs.cogs_k is None:
+            missing.append(
+                {
+                    "field": "cogs_k",
+                    "evidence_address": "Deal Inputs!B4",
+                    "impact": "Gross margin, headroom, boundary, and reviewability cannot be proven.",
+                }
+            )
+        return jsonify(
+            {
+                "status": "HOLD" if missing else "COMPLETE",
+                "missing": missing,
+                "revision": revision,
+            }
+        )
+
     @app.post("/api/agent-runs")
     def create_agent_run():
         if not agent["available"] or runner is None:
@@ -268,6 +562,16 @@ def create_app(
                     }
                 ),
                 503,
+            )
+        if not _agent_request_authorized(agent):
+            return (
+                jsonify(
+                    {
+                        "code": "AGENT_REQUEST_FORBIDDEN",
+                        "error": "Codex runs require an authorized same-origin loopback request.",
+                    }
+                ),
+                403,
             )
         with state.lock:
             snapshot = _capture_agent_snapshot(state)
@@ -292,12 +596,15 @@ def create_app(
         )
 
         def execute_agent_run() -> None:
-            agent_runs.update(run["run_id"], status="running", stage="calling_yigdesk_tools")
+            agent_runs.update(run["run_id"], status="running", stage="starting_codex")
             try:
                 agent_result = runner.run(
                     packet,
                     base_url=internal_url,
                     revision_id=snapshot.revision_id,
+                    progress_callback=lambda event: agent_runs.record_progress(
+                        run["run_id"], event
+                    ),
                 )
             except (AgentExecutionError, AgentVerificationError) as error:
                 message = (
@@ -305,18 +612,30 @@ def create_app(
                     if isinstance(error, AgentVerificationError)
                     else "Codex did not produce a verified result."
                 )
+                failure_phase, elapsed_ms = _agent_failure_evidence(
+                    agent_runs.get(run["run_id"]),
+                    error,
+                    verification_failed=isinstance(error, AgentVerificationError),
+                )
                 agent_runs.update(
                     run["run_id"],
                     status="failed",
                     stage="rejected",
-                    error={"code": type(error).__name__, "message": message},
+                    failure_phase=failure_phase,
+                    elapsed_ms=elapsed_ms,
+                    error={"code": error.code, "message": message},
                 )
                 return
-            except Exception:
+            except Exception as error:
+                failure_phase, elapsed_ms = _agent_failure_evidence(
+                    agent_runs.get(run["run_id"]), error
+                )
                 agent_runs.update(
                     run["run_id"],
                     status="failed",
                     stage="rejected",
+                    failure_phase=failure_phase,
+                    elapsed_ms=elapsed_ms,
                     error={"code": "AGENT_FAILURE", "message": "Codex run failed safely."},
                 )
                 return
@@ -342,19 +661,37 @@ def create_app(
 
 
 def _consequence_packet(state: DemoState) -> dict[str, Any]:
-    return _consequence_packet_for_path(state.workbook_path, state.scenario_id)
+    return _consequence_packet_for_paths(
+        state.workbook_path,
+        state.active_source_path,
+        state.scenario_id,
+        state.source,
+    )
 
 
-def _consequence_packet_for_path(workbook_path: Path, scenario_id: str) -> dict[str, Any]:
-    before = fingerprint(workbook_path)
+def _consequence_packet_for_paths(
+    workbook_path: Path,
+    source_path: Path,
+    scenario_id: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    before = fingerprint(source_path)
+    projection_before = fingerprint(workbook_path)
     consequence = evaluate(read_inputs(workbook_path))
-    after = fingerprint(workbook_path)
+    projection_after = fingerprint(workbook_path)
+    after = fingerprint(source_path)
     packet_core = {
         "protocol_version": "demo-consequence-packet/v1",
         "scenario_id": scenario_id,
         "source_fingerprint": before,
+        "projection_fingerprint": projection_before,
         "consequence": consequence,
         "implementation_scope": "synthetic-five-formula-adapter",
+        "source": {
+            key: deepcopy(value)
+            for key, value in source.items()
+            if key not in {"analysis_bytes_unchanged"}
+        },
     }
     packet_id = "cpkt-" + hashlib.sha256(
         json.dumps(packet_core, sort_keys=True).encode("utf-8")
@@ -363,34 +700,51 @@ def _consequence_packet_for_path(workbook_path: Path, scenario_id: str) -> dict[
         "packet_id": packet_id,
         **packet_core,
         "revision_id": "live-" + before[:24],
-        "analysis_bytes_unchanged": before == after,
+        "analysis_bytes_unchanged": (
+            before == after and projection_before == projection_after
+        ),
         "analyzed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "capabilities": ["read_view", "inspect", "preview_consequence"],
+        "decision_capabilities": [
+            "evaluate_proposal",
+            "compare_proposals",
+            "find_feasible_boundary",
+            "stress_test_assumption",
+            "list_missing_evidence",
+        ],
     }
 
 
 def _capture_agent_snapshot(state: DemoState) -> AgentSnapshot:
     revision_id = "rev-" + secrets.token_hex(12)
-    source_bytes = state.workbook_path.read_bytes()
+    source_bytes = state.active_source_path.read_bytes()
+    workbook_bytes = state.workbook_path.read_bytes()
     source_fingerprint = hashlib.sha256(source_bytes).hexdigest()
     scenario_id = state.scenario_id
-    scenario_json = json.dumps(state.scenarios[scenario_id], sort_keys=True)
+    scenario_json = json.dumps(state.current_scenario, sort_keys=True)
     with tempfile.TemporaryDirectory(prefix="yigdesk-revision-") as directory:
-        immutable_path = Path(directory) / "captured.xlsx"
-        immutable_path.write_bytes(source_bytes)
-        packet = _consequence_packet_for_path(immutable_path, scenario_id)
-        workbook = workbook_snapshot(immutable_path)
-    if {
-        packet["source_fingerprint"],
-        workbook["fingerprint"],
-    } != {source_fingerprint}:
+        immutable_source = Path(directory) / "source.xlsx"
+        immutable_workbook = Path(directory) / "projection.xlsx"
+        immutable_source.write_bytes(source_bytes)
+        immutable_workbook.write_bytes(workbook_bytes)
+        packet = _consequence_packet_for_paths(
+            immutable_workbook,
+            immutable_source,
+            scenario_id,
+            state.source,
+        )
+        workbook = workbook_snapshot(immutable_workbook)
+    if packet["source_fingerprint"] != source_fingerprint:
         raise RuntimeError("captured revision produced inconsistent fingerprints")
+    if packet["projection_fingerprint"] != workbook["fingerprint"]:
+        raise RuntimeError("captured projection produced inconsistent fingerprints")
     packet["revision_id"] = revision_id
     return AgentSnapshot(
         revision_id=revision_id,
         scenario_id=scenario_id,
         scenario_json=scenario_json,
-        workbook_bytes=source_bytes,
+        source_bytes=source_bytes,
+        workbook_bytes=workbook_bytes,
         workbook_json=json.dumps(workbook, sort_keys=True),
         packet_json=json.dumps(packet, sort_keys=True),
     )
@@ -416,19 +770,119 @@ def _requested_snapshot(store: AgentRunStore) -> AgentSnapshot | None:
     return snapshot
 
 
+def _json_object() -> dict[str, Any]:
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ValueError("JSON body must be an object")
+    return body
+
+
+def _deal_inputs_from_scenario(scenario: dict[str, Any]) -> DealInputs:
+    cogs = scenario.get("cogs_k")
+    return DealInputs(
+        list_arr_k=Decimal(str(scenario["list_arr_k"])),
+        current_discount_pct=Decimal(str(scenario["current_discount_pct"])),
+        requested_discount_pct=Decimal(str(scenario["requested_discount_pct"])),
+        cogs_k=None if cogs is None else Decimal(str(cogs)),
+        margin_floor_pct=Decimal(str(scenario["margin_floor_pct"])),
+    )
+
+
+def _decision_inputs(
+    state: DemoState, store: AgentRunStore
+) -> tuple[DealInputs, dict[str, str]]:
+    snapshot = _requested_snapshot(store)
+    if snapshot is not None:
+        packet = snapshot.packet()
+        return _deal_inputs_from_scenario(snapshot.scenario()), _revision_fields(packet)
+    with state.lock:
+        packet = _consequence_packet(state)
+        return _deal_inputs_from_scenario(state.current_scenario), _revision_fields(packet)
+
+
 def _is_loopback_host(host: str) -> bool:
     return host.strip().lower().strip("[]") in {"127.0.0.1", "localhost", "::1"}
+
+
+def _agent_failure_evidence(
+    run: dict[str, Any] | None,
+    error: Exception,
+    *,
+    verification_failed: bool = False,
+) -> tuple[str, int]:
+    """Return only the last allowlisted phase and monotonic elapsed time."""
+
+    progress = (run or {}).get("progress") or [
+        {"phase": "starting_codex", "elapsed_ms": 0}
+    ]
+    last = progress[-1]
+    candidate_phase = getattr(error, "phase", None)
+    if verification_failed:
+        phase = "verifying_result"
+    elif (
+        candidate_phase in AGENT_PHASES
+        and AGENT_PHASES.index(candidate_phase) >= AGENT_PHASES.index(last["phase"])
+    ):
+        phase = candidate_phase
+    else:
+        phase = last["phase"]
+    candidate_elapsed = getattr(error, "elapsed_ms", None)
+    elapsed_ms = (
+        candidate_elapsed
+        if isinstance(candidate_elapsed, int)
+        and not isinstance(candidate_elapsed, bool)
+        and candidate_elapsed >= last["elapsed_ms"]
+        else last["elapsed_ms"]
+    )
+    return phase, elapsed_ms
+
+
+def _is_loopback_address(address: str) -> bool:
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if parsed.is_loopback:
+        return True
+    return bool(getattr(parsed, "ipv4_mapped", None) and parsed.ipv4_mapped.is_loopback)
+
+
+def _agent_request_authorized(agent: dict[str, Any]) -> bool:
+    hostname = urlsplit(f"//{request.host}").hostname or ""
+    supplied = request.headers.get("X-Yigdesk-Agent-Token", "")
+    expected = agent.get("request_token", "")
+    return bool(
+        _is_loopback_address(request.remote_addr or "")
+        and _is_loopback_host(hostname)
+        and supplied
+        and expected
+        and secrets.compare_digest(supplied, expected)
+    )
 
 
 def _state_payload(state: DemoState, agent: dict[str, Any] | None = None) -> dict[str, Any]:
     packet = _consequence_packet(state)
     return {
         "scenario_id": state.scenario_id,
-        "scenario": state.scenarios[state.scenario_id],
+        "scenario": state.current_scenario,
+        "source": deepcopy(state.source),
         "workbook": workbook_snapshot(state.workbook_path),
         "capabilities": ["read_view", "inspect", "preview_consequence"],
+        "decision_capabilities": [
+            "evaluate_proposal",
+            "compare_proposals",
+            "find_feasible_boundary",
+            "stress_test_assumption",
+            "list_missing_evidence",
+        ],
         "revision": _revision_fields(packet),
-        "agent": agent or {"available": False, "mode": "local-preview", "model": None},
+        "agent": agent
+        or {
+            "available": False,
+            "mode": "local-preview",
+            "model": None,
+            "reasoning_effort": None,
+        },
     }
 
 

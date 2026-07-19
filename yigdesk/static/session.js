@@ -23,8 +23,11 @@ export class YigdeskSession {
     return this.#request("/api/analyze", { method: "POST", body: "{}" });
   }
 
-  async startAgentRun() {
-    return this.#request("/api/agent-runs", { method: "POST", body: "{}" });
+  async startAgentRun(requestToken) {
+    const headers = typeof requestToken === "string" && requestToken
+      ? { "X-Yigdesk-Agent-Token": requestToken }
+      : {};
+    return this.#request("/api/agent-runs", { method: "POST", body: "{}", headers });
   }
 
   async getAgentRun(runId) {
@@ -37,7 +40,11 @@ export class YigdeskSession {
   async #request(path, options = {}) {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...options,
-      headers: { "Content-Type": "application/json", "X-Yigdesk-Action": "public-preview" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Yigdesk-Action": "public-preview",
+        ...(options.headers || {}),
+      },
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || body.code || "Request failed");

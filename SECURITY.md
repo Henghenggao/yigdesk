@@ -35,8 +35,25 @@ file-change, other-server, reordered, missing, or extra tool activity; the only 
 active trace is the exact three-call Yigdesk MCP sequence. A missing trace, tool call,
 source drift, packet mismatch, evidence mismatch, or figure mismatch rejects the run.
 Real Codex mode is fail-closed unless the Flask host is loopback (`127.0.0.1`, `localhost`, or `::1`); public deployments remain local-preview only and must never expose Codex app-server or local MCP transports directly to the internet.
+Starting a credential-backed run additionally requires a per-process same-origin token,
+a loopback Host header, and a loopback peer address. A cross-origin form POST or a
+non-loopback WSGI request cannot spend the operator's Codex quota.
 
 This demo has no analyzed-model update, send, approval-execution, write-back, signing, vault, persistent audit-service, or identity-provider endpoint. Agent traces are ephemeral demo evidence. Scenario reset only regenerates a bundled synthetic fixture. <code>HOST=0.0.0.0</code> is intended only for an isolated synthetic demo deployment.
+
+The upload endpoint accepts only macro-free <code>.xlsx</code> files up to 8 MB.
+It requires a generated <code>SYNTHETIC</code> marker, rejects unexpected P&amp;L
+schemas, bounds archive members, expanded archive bytes, sheets, rows, and
+columns, ignores external workbook links, and never evaluates workbook macros.
+Uploaded bytes live only in the configured ignored runtime directory. Analysis
+hashes the source before and after parsing; the derived five-formula projection
+has its own fingerprint. This is demo provenance, not malware scanning or a
+production file-ingestion service.
+
+Proposal evaluation, comparison, boundary, missing-evidence, and stress-test
+routes are deterministic read operations. Stress assumptions are explicitly
+non-persistent. Exact unrounded decimals decide the configured margin constraint;
+rounded display values cannot turn a failing proposal into a pass.
 
 ## Reporting
 

@@ -1,0 +1,27 @@
+[agents]
+max_threads = 5
+max_depth = 1
+
+[agents.finance_analyst]
+description = "Tests proposals against exact financial evidence and the configured margin floor."
+config_file = "agents/finance_analyst.toml"
+
+[agents.sales_advocate]
+description = "Frames customer-friendly alternatives without inventing commercial evidence."
+config_file = "agents/sales_advocate.toml"
+
+[agents.risk_challenger]
+description = "Challenges rounding, missing evidence, revision drift, and COGS sensitivity."
+config_file = "agents/risk_challenger.toml"
+
+[agents.decision_optimizer]
+description = "Synthesizes revision-consistent role outputs without confusing feasibility with optimality."
+config_file = "agents/decision_optimizer.toml"
+
+[mcp_servers.yigdesk]
+command = "python"
+args = ["-m", "yigdesk.mcp_server"]
+required = true
+startup_timeout_sec = 15
+tool_timeout_sec = 30
+env = { YIGDESK_URL = "http://127.0.0.1:8787", YIGDESK_AUDIT_FILE = "runtime/codex-a2a-audit.jsonl" }

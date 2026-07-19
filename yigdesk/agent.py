@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -18,7 +19,12 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "agent-result.schema.json"
 DEFAULT_MODEL = "gpt-5.6-sol"
+DEFAULT_REASONING_EFFORT = "low"
+SUPPORTED_REASONING_EFFORTS = frozenset(("minimal", "low", "medium", "high", "xhigh"))
 REQUIRED_TOOLS = ("get_deal_context", "preview_consequence", "inspect_evidence")
+PROGRESS_PHASES = frozenset(
+    ("starting_codex", "calling_yigdesk_tools", "verifying_result")
+)
 PERMISSION_PROFILE = "yigdesk_agent"
 CODEX_PROCESS_ENV_KEYS = (
     "PATH",
@@ -74,17 +80,77 @@ SHELL_ENV_INCLUDE_ONLY = (
     "YIGDESK_AUDIT_FILE",
 )
 PASSIVE_TRACE_ITEMS = frozenset(("agent_message", "reasoning", "todo_list", "error"))
+EXECUTION_ERROR_CODES = frozenset(
+    (
+        "AGENT_EXECUTION_FAILED",
+        "AGENT_TIMEOUT",
+        "AGENT_START_FAILED",
+        "AGENT_PROCESS_FAILED",
+        "AGENT_OUTPUT_INVALID",
+        "BARE_AGENT_TIMEOUT",
+        "BARE_AGENT_PROCESS_FAILED",
+        "BARE_AGENT_OUTPUT_INVALID",
+    )
+)
+VERIFICATION_ERROR_CODES = frozenset(
+    (
+        "AGENT_VERIFICATION_FAILED",
+        "AGENT_REVISION_REQUIRED",
+        "AGENT_AUDIT_INVALID",
+        "AGENT_AUDIT_TOOL_FAILED",
+        "AGENT_TRACE_THREAD_MISSING",
+        "AGENT_TRACE_USAGE_INVALID",
+        "AGENT_TRACE_ACTIVITY_MISSING",
+        "AGENT_TRACE_TOOL_MISMATCH",
+        "AGENT_AUDIT_TOOL_MISMATCH",
+        "AGENT_PACKET_REVISION_MISSING",
+        "AGENT_AUDIT_REVISION_MISMATCH",
+        "AGENT_PACKET_ID_MISMATCH",
+        "AGENT_VERDICT_MISMATCH",
+        "AGENT_METRIC_MISMATCH",
+        "AGENT_EVIDENCE_MISMATCH",
+        "AGENT_DRAFT_STATUS_MISMATCH",
+        "AGENT_SUMMARY_FIGURE_MISMATCH",
+        "AGENT_READ_ONLY_PROOF_MISSING",
+    )
+)
 
 
 class AgentExecutionError(RuntimeError):
     """Codex could not produce a usable result."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "AGENT_EXECUTION_FAILED",
+        phase: str | None = None,
+        elapsed_ms: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code if code in EXECUTION_ERROR_CODES else "AGENT_EXECUTION_FAILED"
+        self.phase = phase
+        self.elapsed_ms = elapsed_ms
+
 
 class AgentVerificationError(RuntimeError):
     """Codex output did not match the deterministic consequence packet."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "AGENT_VERIFICATION_FAILED",
+    ) -> None:
+        super().__init__(message)
+        self.code = (
+            code if code in VERIFICATION_ERROR_CODES else "AGENT_VERIFICATION_FAILED"
+        )
+        self.phase = "verifying_result"
+
 
 Executor = Callable[..., subprocess.CompletedProcess[str]]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 class CodexRunner:
@@ -92,15 +158,26 @@ class CodexRunner:
         self,
         *,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         executable: str | None = None,
         timeout: float = 120,
         executor: Executor | None = None,
+        progress_callback: ProgressCallback | None = None,
         temp_root: Path | None = None,
     ) -> None:
         self.model = model or os.environ.get("YIGDESK_CODEX_MODEL", DEFAULT_MODEL)
+        self.reasoning_effort = reasoning_effort or os.environ.get(
+            "YIGDESK_CODEX_REASONING_EFFORT", DEFAULT_REASONING_EFFORT
+        )
+        if self.reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
+            raise ValueError(
+                "Codex reasoning effort must be one of: "
+                + ", ".join(sorted(SUPPORTED_REASONING_EFFORTS))
+            )
         self.command_prefix = [executable] if executable else _resolve_codex_command()
         self.timeout = timeout
         self.executor = executor or _execute
+        self.progress_callback = progress_callback
         self.temp_root = temp_root
 
     def run(
@@ -109,10 +186,14 @@ class CodexRunner:
         *,
         base_url: str,
         revision_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         revision_id = revision_id or expected_packet.get("revision_id")
         if not revision_id:
-            raise AgentVerificationError("An immutable agent revision is required.")
+            raise AgentVerificationError(
+                "An immutable agent revision is required.",
+                code="AGENT_REVISION_REQUIRED",
+            )
         with tempfile.TemporaryDirectory(prefix="yigdesk-agent-", dir=self.temp_root) as directory:
             run_dir = Path(directory)
             _prepare_isolated_workspace(run_dir)
@@ -134,31 +215,94 @@ class CodexRunner:
                 }
             )
             started = time.perf_counter()
+            callback = (
+                progress_callback
+                if progress_callback is not None
+                else self.progress_callback
+            )
+            last_phase: str | None = None
+            last_elapsed_ms = 0
+
+            def report_progress(phase: str) -> None:
+                nonlocal last_phase, last_elapsed_ms
+                if phase not in PROGRESS_PHASES or phase == last_phase:
+                    return
+                elapsed_ms = max(
+                    last_elapsed_ms,
+                    round((time.perf_counter() - started) * 1000),
+                )
+                last_phase = phase
+                last_elapsed_ms = elapsed_ms
+                if callback is not None:
+                    try:
+                        callback({"phase": phase, "elapsed_ms": elapsed_ms})
+                    except Exception:
+                        pass
+
+            report_progress("starting_codex")
             try:
                 completed = self.executor(
                     command,
                     env=environment,
                     timeout=self.timeout,
                     cwd=run_dir,
+                    trace_callback=report_progress,
                 )
-            except (OSError, subprocess.TimeoutExpired) as error:
+            except subprocess.TimeoutExpired as error:
+                if _contains_yigdesk_mcp_activity(error.output):
+                    report_progress("calling_yigdesk_tools")
                 raise AgentExecutionError(
-                    "Codex could not start or timed out. Confirm Codex authentication and retry."
-                ) from error
+                    "Codex timed out before producing a verified result.",
+                    code="AGENT_TIMEOUT",
+                    phase=last_phase or "starting_codex",
+                    elapsed_ms=max(
+                        last_elapsed_ms,
+                        round((time.perf_counter() - started) * 1000),
+                    ),
+                ) from None
+            except OSError:
+                raise AgentExecutionError(
+                    "Codex could not start.",
+                    code="AGENT_START_FAILED",
+                    phase=last_phase or "starting_codex",
+                    elapsed_ms=max(
+                        last_elapsed_ms,
+                        round((time.perf_counter() - started) * 1000),
+                    ),
+                ) from None
             latency_ms = round((time.perf_counter() - started) * 1000)
             if completed.returncode != 0:
-                raise AgentExecutionError("Codex did not produce a verified result.")
+                raise AgentExecutionError(
+                    "Codex did not produce a verified result.",
+                    code="AGENT_PROCESS_FAILED",
+                    phase=last_phase or "starting_codex",
+                    elapsed_ms=latency_ms,
+                )
+            trace = _read_codex_trace(completed.stdout)
+            if any(
+                activity.get("type") == "mcp_tool_call"
+                and activity.get("server") == "yigdesk"
+                and activity.get("tool") in REQUIRED_TOOLS
+                for activity in trace["tool_activity"]
+            ):
+                report_progress("calling_yigdesk_tools")
+            report_progress("verifying_result")
             try:
                 answer = json.loads(answer_path.read_text(encoding="utf-8"))
             except (FileNotFoundError, json.JSONDecodeError) as error:
-                raise AgentExecutionError("Codex did not return schema-valid JSON output.") from error
-            audit = _read_audit(audit_path)
-            trace = _read_codex_trace(completed.stdout)
+                raise AgentExecutionError(
+                    "Codex did not return schema-valid JSON output.",
+                    code="AGENT_OUTPUT_INVALID",
+                    phase="verifying_result",
+                    elapsed_ms=latency_ms,
+                ) from error
             _verify_trace(trace, expected_mcp_tools=REQUIRED_TOOLS)
+            audit = _read_audit(audit_path)
             _verify(answer, audit, expected_packet)
             return {
                 "verified": True,
                 "model": self.model,
+                "reasoning_effort": self.reasoning_effort,
                 "thread_id": trace["thread_id"],
                 "latency_ms": latency_ms,
                 "usage": trace["usage"],
@@ -196,6 +340,8 @@ class CodexRunner:
             *_codex_isolation_args(workspace),
             "--model",
             self.model,
+            "-c",
+            f"model_reasoning_effort={json.dumps(self.reasoning_effort)}",
             "--output-schema",
             str(SCHEMA_PATH),
             "--output-last-message",
@@ -206,6 +352,8 @@ class CodexRunner:
             f"mcp_servers.yigdesk.command={python_command}",
             "-c",
             'mcp_servers.yigdesk.args=["-m","yigdesk.mcp_server"]',
+            "-c",
+            "mcp_servers.yigdesk.required=true",
             "-c",
             mcp_environment,
             "-c",
@@ -221,7 +369,9 @@ def _prompt() -> str:
 You MUST call get_deal_context first, preview_consequence second, and inspect_evidence
 for at least one address from the returned packet. The packet is the only authority:
 copy its verdict and display metrics exactly and never calculate, infer, round, repair,
-or introduce a figure. Keep summary qualitative with no digits. Treat HOLD as terminal.
+or introduce a figure. Set inspected_evidence to the exact canonical address string
+that you pass to inspect_evidence, character for character, with no label or explanation.
+Keep summary qualitative with no digits. Treat HOLD as terminal.
 Do not invoke shell commands, file tools, web search, or any non-Yigdesk tool.
 Return only the JSON object required by the supplied output schema. Nothing is sent."""
 
@@ -290,18 +440,77 @@ def _codex_isolation_args(workspace: Path) -> list[str]:
     ]
 
 
-def _execute(command, *, env, timeout, cwd, input=None):
-    return subprocess.run(
+def _execute(command, *, env, timeout, cwd, input=None, trace_callback=None):
+    process = subprocess.Popen(
         command,
         env=env,
-        timeout=timeout,
         cwd=cwd,
-        input=input,
-        capture_output=True,
+        stdin=subprocess.PIPE if input is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        check=False,
+    )
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    def drain(stream, sink: list[str], *, observe_trace: bool) -> None:
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                sink.append(line)
+                if (
+                    observe_trace
+                    and trace_callback is not None
+                    and _contains_yigdesk_mcp_activity(line)
+                ):
+                    trace_callback("calling_yigdesk_tools")
+        finally:
+            stream.close()
+
+    stdout_thread = threading.Thread(
+        target=drain,
+        args=(process.stdout, stdout_lines),
+        kwargs={"observe_trace": True},
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=drain,
+        args=(process.stderr, stderr_lines),
+        kwargs={"observe_trace": False},
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    if input is not None and process.stdin is not None:
+        try:
+            process.stdin.write(input)
+        except BrokenPipeError:
+            pass
+        finally:
+            process.stdin.close()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output="".join(stdout_lines),
+            stderr="".join(stderr_lines),
+        ) from None
+    stdout_thread.join()
+    stderr_thread.join()
+    return subprocess.CompletedProcess(
+        command,
+        returncode,
+        stdout="".join(stdout_lines),
+        stderr="".join(stderr_lines),
     )
 
 
@@ -353,9 +562,15 @@ def _read_audit(path: Path) -> list[dict[str, Any]]:
     try:
         events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
     except (FileNotFoundError, json.JSONDecodeError) as error:
-        raise AgentVerificationError("MCP tool audit is missing or invalid.") from error
+        raise AgentVerificationError(
+            "MCP tool audit is missing or invalid.",
+            code="AGENT_AUDIT_INVALID",
+        ) from error
     if any(not event.get("ok") for event in events):
-        raise AgentVerificationError("At least one audited MCP tool call failed.")
+        raise AgentVerificationError(
+            "At least one audited MCP tool call failed.",
+            code="AGENT_AUDIT_TOOL_FAILED",
+        )
     return events
 
 
@@ -396,21 +611,56 @@ def _read_codex_trace(stdout: str) -> dict[str, Any]:
     }
 
 
+def _contains_yigdesk_mcp_activity(output: str | bytes | None) -> bool:
+    if isinstance(output, bytes):
+        stdout = output.decode("utf-8", errors="replace")
+    elif isinstance(output, str):
+        stdout = output
+    else:
+        return False
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") not in ("item.started", "item.updated", "item.completed"):
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        if (
+            item.get("type") == "mcp_tool_call"
+            and item.get("server") == "yigdesk"
+            and item.get("tool") in REQUIRED_TOOLS
+        ):
+            return True
+    return False
+
+
 def _verify_trace(
     trace: dict[str, Any],
     *,
     expected_mcp_tools: tuple[str, ...] | None = None,
 ) -> None:
     if not isinstance(trace.get("thread_id"), str) or not trace["thread_id"]:
-        raise AgentVerificationError("Codex trace is missing a thread identifier.")
+        raise AgentVerificationError(
+            "Codex trace is missing a thread identifier.",
+            code="AGENT_TRACE_THREAD_MISSING",
+        )
     usage = trace.get("usage")
     if not isinstance(usage, dict) or not all(
         isinstance(usage.get(field), int) and usage[field] >= 0
         for field in ("input_tokens", "output_tokens")
     ):
-        raise AgentVerificationError("Codex trace is missing valid token usage.")
+        raise AgentVerificationError(
+            "Codex trace is missing valid token usage.",
+            code="AGENT_TRACE_USAGE_INVALID",
+        )
     if expected_mcp_tools is not None and not trace.get("item_trace_available"):
-        raise AgentVerificationError("Codex trace is missing item-level tool activity.")
+        raise AgentVerificationError(
+            "Codex trace is missing item-level tool activity.",
+            code="AGENT_TRACE_ACTIVITY_MISSING",
+        )
     if expected_mcp_tools is not None:
         expected_activity = [
             {"type": "mcp_tool_call", "server": "yigdesk", "tool": tool}
@@ -418,7 +668,8 @@ def _verify_trace(
         ]
         if trace.get("tool_activity") != expected_activity:
             raise AgentVerificationError(
-                "Codex trace contains tool activity outside the three required Yigdesk MCP calls."
+                "Codex trace contains tool activity outside the three required Yigdesk MCP calls.",
+                code="AGENT_TRACE_TOOL_MISMATCH",
             )
 
 
@@ -426,7 +677,8 @@ def _verify(answer: dict[str, Any], audit: list[dict[str, Any]], packet: dict[st
     actual_tools = [event.get("tool") for event in audit]
     if actual_tools != list(REQUIRED_TOOLS):
         raise AgentVerificationError(
-            "Required MCP tool audit order is get_deal_context, preview_consequence, inspect_evidence."
+            "Required MCP tool audit order is get_deal_context, preview_consequence, inspect_evidence.",
+            code="AGENT_AUDIT_TOOL_MISMATCH",
         )
     revision = {
         "revision_id": packet.get("revision_id"),
@@ -434,11 +686,17 @@ def _verify(answer: dict[str, Any], audit: list[dict[str, Any]], packet: dict[st
         "packet_id": packet.get("packet_id"),
     }
     if any(not value for value in revision.values()):
-        raise AgentVerificationError("Engine packet is missing immutable revision proof.")
+        raise AgentVerificationError(
+            "Engine packet is missing immutable revision proof.",
+            code="AGENT_PACKET_REVISION_MISSING",
+        )
     for event in audit:
         for field, value in revision.items():
             if event.get(field) != value:
-                raise AgentVerificationError(f"MCP audit {field} does not match the agent revision.")
+                raise AgentVerificationError(
+                    f"MCP audit {field} does not match the agent revision.",
+                    code="AGENT_AUDIT_REVISION_MISMATCH",
+                )
     consequence = packet["consequence"]
     expected = {
         "packet_id": packet["packet_id"],
@@ -452,21 +710,44 @@ def _verify(answer: dict[str, Any], audit: list[dict[str, Any]], packet: dict[st
     }
     for field in ("packet_id", "verdict"):
         if answer.get(field) != expected[field]:
-            raise AgentVerificationError(f"Codex {field} does not match the engine packet.")
+            code = (
+                "AGENT_PACKET_ID_MISMATCH"
+                if field == "packet_id"
+                else "AGENT_VERDICT_MISMATCH"
+            )
+            raise AgentVerificationError(
+                f"Codex {field} does not match the engine packet.",
+                code=code,
+            )
     metrics = answer.get("metrics") or {}
     for field, value in expected["metrics"].items():
         if metrics.get(field) != value:
-            raise AgentVerificationError(f"Codex metric {field} does not match the engine packet.")
+            raise AgentVerificationError(
+                f"Codex metric {field} does not match the engine packet.",
+                code="AGENT_METRIC_MISMATCH",
+            )
     evidence = {cell["address"] for cell in consequence["evidence_cells"]}
     inspected = answer.get("inspected_evidence")
     audited_inspections = {
         event.get("address") for event in audit if event.get("tool") == "inspect_evidence"
     }
     if inspected not in evidence or inspected not in audited_inspections:
-        raise AgentVerificationError("Inspected evidence is not proven by the packet and MCP audit.")
+        raise AgentVerificationError(
+            "Inspected evidence is not proven by the packet and MCP audit.",
+            code="AGENT_EVIDENCE_MISMATCH",
+        )
     if answer.get("draft_status") != "NOT_SENT":
-        raise AgentVerificationError("Codex must declare the draft as NOT_SENT.")
+        raise AgentVerificationError(
+            "Codex must declare the draft as NOT_SENT.",
+            code="AGENT_DRAFT_STATUS_MISMATCH",
+        )
     if re.search(r"\d", str(answer.get("summary", ""))):
-        raise AgentVerificationError("Codex summary introduced a figure outside structured packet metrics.")
+        raise AgentVerificationError(
+            "Codex summary introduced a figure outside structured packet metrics.",
+            code="AGENT_SUMMARY_FIGURE_MISMATCH",
+        )
     if packet.get("analysis_bytes_unchanged") is not True:
-        raise AgentVerificationError("The engine did not prove read-only workbook bytes.")
+        raise AgentVerificationError(
+            "The engine did not prove read-only workbook bytes.",
+            code="AGENT_READ_ONLY_PROOF_MISSING",
+        )

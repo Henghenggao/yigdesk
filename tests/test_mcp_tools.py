@@ -47,3 +47,24 @@ def test_tool_client_translates_unknown_evidence_into_actionable_error(tmp_path)
 
         with pytest.raises(ToolCallError, match="Choose an address returned"):
             client.inspect_evidence("Deal Model!Z99")
+
+
+def test_tool_client_exposes_revision_bound_proposal_challenges(tmp_path):
+    with live_demo(tmp_path) as base_url:
+        client = YigdeskToolClient(base_url)
+        evaluated = client.evaluate_proposal("12")
+        compared = client.compare_proposals(["10", "12"])
+        boundary = client.find_feasible_boundary("0.01")
+        stressed = client.stress_test_assumption("12", "5")
+        missing = client.list_missing_evidence()
+
+    revisions = {
+        tuple(sorted(result["revision"].items()))
+        for result in (evaluated, compared, boundary, stressed, missing)
+    }
+    assert len(revisions) == 1
+    assert evaluated["proposal"]["constraint_pass"] is True
+    assert len(compared["comparison"]["proposals"]) == 2
+    assert boundary["boundary"]["status"] == "READY"
+    assert stressed["stress_test"]["assumption"]["persistent"] is False
+    assert missing["status"] == "COMPLETE"

@@ -13,3 +13,14 @@ This public repository is a read-only consequence-preview demo.
 9. Run <code>python -m pytest</code> and <code>npm run test:e2e</code> before completion.
 
 The demo packet may be copied for inspection; it is not a production Yigrid attestation.
+
+When the user explicitly asks for the Northwind decision council, spawn the custom
+agent types <code>finance_analyst</code>, <code>sales_advocate</code>, and
+<code>risk_challenger</code> in parallel. Require these exact actor-attributed
+Yigdesk sequences: finance = context, boundary, submitted evaluation, B4
+inspection; sales = context, submitted evaluation, one alternative evaluation;
+risk = context, missing evidence, boundary, submitted +5% COGS stress, B4
+inspection. Do not replace them with a common sequence. Wait for all three,
+require matching Yigdesk revision identifiers, then spawn
+<code>decision_optimizer</code> for exactly context, unique-proposal comparison,
+and B4 inspection. The council must not simulate agent dialogue or invent market data.

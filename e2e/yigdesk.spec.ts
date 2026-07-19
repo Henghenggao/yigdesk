@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import path from 'node:path';
 
 test.beforeEach(async ({ request }) => {
   const reset = await request.post('/api/reset', { data: { scenario_id: 'ready' } });
@@ -54,6 +55,38 @@ test('mobile layout keeps the proof workflow usable without horizontal overflow'
   expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth);
 });
 
+test('uploaded synthetic FY2024 workbook drives a real parsed decision board', async ({ page }) => {
+  await page.goto('/');
+  const sample = path.resolve('runtime/e2e-upload-sample.xlsx');
+
+  await page.locator('#workbook-upload').setInputFiles(sample);
+  await expect(page.locator('#upload-file-label')).toHaveText('e2e-upload-sample.xlsx');
+  await page.locator('#requested-discount').fill('2.00');
+  await page.locator('#margin-floor').fill('30.00');
+  await page.locator('#upload-action').click();
+
+  await expect(page.locator('#upload-status')).toContainText('48 FY2024 source cells');
+  await expect(page.locator('#source-pill')).toHaveText('UPLOADED · SYNTHETIC');
+  await expect(page.locator('#attachment-name')).toHaveText('e2e-upload-sample.xlsx');
+  await expect(page.locator('#fingerprint')).toContainText('source sha256');
+  await expect(page.getByRole('button', { name: /complete evidence/i })).toHaveAttribute('aria-pressed', 'false');
+
+  await page.getByTestId('analyze').click();
+
+  await expect(page.getByTestId('verdict')).toHaveText('READY FOR CFO');
+  await expect(page.locator('#net-arr')).toHaveText('$14,365k');
+  await expect(page.locator('#gross-margin')).toHaveText('30.2%');
+  await expect(page.locator('#a2a-state')).toHaveText('A2A READY');
+  await expect(page.locator('#board-requested')).toHaveText('2.0%');
+  await expect(page.locator('#board-boundary')).toHaveText('2.23%');
+  await expect(page.locator('#board-rounding')).toHaveText('2.24%');
+  await expect(page.locator('#board-rounding-note')).toContainText('30.0% displayed');
+  await expect(page.locator('#board-rounding-note')).toContainText('FAIL');
+  await expect(page.locator('#board-stress')).toHaveText('26.7%');
+  await expect(page.locator('#copy-council')).toBeEnabled();
+  await expect(page.locator('#byte-proof')).toHaveText('Workbook bytes unchanged');
+});
+
 test('missing evidence produces an honest partial packet without an action control', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Missing cost evidence' }).click();
@@ -83,6 +116,74 @@ test('real Codex mode exposes a verified MCP run instead of a local fallback', a
   await expect(page.locator('#agent-meta')).toContainText('3 tools');
   await expect(page.locator('#agent-meta')).toContainText('arun-');
   await expect(page.locator('#agent-verified')).toHaveText('ENGINE MATCH VERIFIED');
+});
+
+test('browser sends the run token and renders truthful Codex phases', async ({ page, request }) => {
+  const preview = await request.post('/api/analyze');
+  expect(preview.ok()).toBe(true);
+  const { packet } = await preview.json();
+  const requestToken = 'browser-only-request-token';
+
+  await page.route('**/api/state', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.agent = {
+      available: true,
+      mode: 'codex-mcp',
+      model: 'gpt-5.6-sol',
+      reasoning_effort: 'low',
+      request_token: requestToken,
+    };
+    await route.fulfill({ response, json: body });
+  });
+
+  await page.route('**/api/agent-runs', async (route) => {
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().headers()['x-yigdesk-agent-token']).toBe(requestToken);
+    await route.fulfill({
+      status: 202,
+      json: { run_id: 'arun-phases', status: 'queued', stage: 'starting_codex' },
+    });
+  });
+
+  let poll = 0;
+  await page.route('**/api/agent-runs/arun-phases', async (route) => {
+    poll += 1;
+    if (poll === 1) {
+      await route.fulfill({
+        json: { run_id: 'arun-phases', status: 'running', stage: 'calling_yigdesk_tools' },
+      });
+      return;
+    }
+    if (poll === 2) {
+      await route.fulfill({
+        json: { run_id: 'arun-phases', status: 'running', stage: 'verifying_result' },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        run_id: 'arun-phases',
+        status: 'completed',
+        stage: 'review_ready',
+        packet,
+        agent: {
+          model: 'gpt-5.6-sol',
+          tool_calls: ['get_deal_context', 'preview_consequence', 'inspect_evidence'],
+          latency_ms: 25,
+          usage: { input_tokens: 10, output_tokens: 5 },
+          verified: true,
+        },
+      },
+    });
+  });
+
+  await page.goto('/');
+  await page.getByTestId('analyze').click();
+  await expect(page.getByTestId('analyze')).toContainText('Codex · starting…');
+  await expect(page.getByTestId('analyze')).toContainText('Codex · calling Yigdesk tools…');
+  await expect(page.getByTestId('analyze')).toContainText('Codex · verifying result…');
+  await expect(page.getByTestId('verdict')).toHaveText('READY FOR CFO');
 });
 
 test('a failed retry revokes stale proof immediately and a later success recovers', async ({ page, request }) => {

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
+import sys
+import time
 
 import pytest
 
 from yigdesk.agent import (
+    AgentExecutionError,
     AgentVerificationError,
     CodexRunner,
     _codex_environment,
+    _execute,
     _resolve_codex_command,
 )
 
@@ -72,7 +78,7 @@ def audited_calls(**overrides):
 
 
 def executor_with(answer, *, audit=None, trace=None):
-    def execute(command, *, env, timeout, cwd):
+    def execute(command, *, env, timeout, cwd, trace_callback=None):
         assert "--ignore-user-config" in command
         assert "--ignore-rules" in command
         assert "--strict-config" in command
@@ -152,6 +158,8 @@ def executor_with(answer, *, audit=None, trace=None):
             if trace is None
             else [json.dumps(event) for event in trace]
         )
+        if trace_callback is not None:
+            trace_callback("calling_yigdesk_tools")
         stdout = "\n".join(events)
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
@@ -170,6 +178,7 @@ def test_runner_accepts_only_engine_grounded_audited_codex_output(tmp_path):
     assert result["verified"] is True
     assert result["thread_id"] == "thread-123"
     assert result["model"] == "gpt-5.6-sol"
+    assert result["reasoning_effort"] == "low"
     assert result["tool_calls"] == [
         "get_deal_context",
         "preview_consequence",
@@ -177,6 +186,171 @@ def test_runner_accepts_only_engine_grounded_audited_codex_output(tmp_path):
     ]
     assert result["usage"]["input_tokens"] == 420
     assert result["answer"]["metrics"]["gross_margin"] == "45.5%"
+
+
+def test_runner_pins_low_reasoning_effort_in_strict_codex_config(tmp_path):
+    captured = {}
+    delegate = executor_with(agent_answer())
+
+    def execute(command, **kwargs):
+        captured["command"] = command
+        return delegate(command, **kwargs)
+
+    runner = CodexRunner(executor=execute, temp_root=tmp_path)
+    runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+
+    assert 'model_reasoning_effort="low"' in captured["command"]
+
+
+def test_runner_requires_exact_canonical_evidence_address_in_codex_output(tmp_path):
+    captured = {}
+    delegate = executor_with(agent_answer())
+
+    def execute(command, **kwargs):
+        captured["command"] = command
+        return delegate(command, **kwargs)
+
+    runner = CodexRunner(executor=execute, temp_root=tmp_path)
+    runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+
+    prompt = captured["command"][-1]
+    schema_path = captured["command"][captured["command"].index("--output-schema") + 1]
+    schema = json.loads(open(schema_path, encoding="utf-8").read())
+    evidence_schema = schema["properties"]["inspected_evidence"]
+
+    assert "character for character" in prompt
+    assert "with no label or explanation" in prompt
+    assert re.fullmatch(evidence_schema["pattern"], "Deal Model!B4")
+    assert not re.fullmatch(
+        evidence_schema["pattern"],
+        "I inspected the canonical address Deal Model!B4.",
+    )
+
+
+def test_runner_requires_yigdesk_mcp_server_to_initialize(tmp_path):
+    captured = {}
+    delegate = executor_with(agent_answer())
+
+    def execute(command, **kwargs):
+        captured["command"] = command
+        return delegate(command, **kwargs)
+
+    runner = CodexRunner(executor=execute, temp_root=tmp_path)
+    runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+
+    assert "mcp_servers.yigdesk.required=true" in captured["command"]
+
+
+def test_runner_reports_only_sanitized_monotonic_progress_phases(tmp_path):
+    events = []
+    runner = CodexRunner(
+        executor=executor_with(agent_answer()),
+        temp_root=tmp_path,
+    )
+
+    runner.run(
+        expected_packet(),
+        base_url="http://127.0.0.1:8787",
+        progress_callback=events.append,
+    )
+
+    assert [event["phase"] for event in events] == [
+        "starting_codex",
+        "calling_yigdesk_tools",
+        "verifying_result",
+    ]
+    assert all(set(event) == {"phase", "elapsed_ms"} for event in events)
+    assert [event["elapsed_ms"] for event in events] == sorted(
+        event["elapsed_ms"] for event in events
+    )
+
+
+def test_runner_timeout_exposes_only_sanitized_partial_trace_phase(tmp_path):
+    secret = "customer-sensitive-prompt"
+    partial_trace = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "thread-secret"}),
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {
+                        "type": "mcp_tool_call",
+                        "server": "yigdesk",
+                        "tool": "get_deal_context",
+                        "arguments": {"request": secret},
+                    },
+                }
+            ),
+        ]
+    )
+
+    def execute(command, *, timeout, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=partial_trace,
+            stderr=f"stderr must not leak: {secret}",
+        )
+
+    events = []
+    runner = CodexRunner(executor=execute, temp_root=tmp_path)
+
+    with pytest.raises(AgentExecutionError) as caught:
+        runner.run(
+            expected_packet(),
+            base_url="http://127.0.0.1:8787",
+            progress_callback=events.append,
+        )
+
+    error = caught.value
+    assert error.code == "AGENT_TIMEOUT"
+    assert error.phase == "calling_yigdesk_tools"
+    assert isinstance(error.elapsed_ms, int) and error.elapsed_ms >= 0
+    assert [event["phase"] for event in events] == [
+        "starting_codex",
+        "calling_yigdesk_tools",
+    ]
+    assert secret not in str(error)
+    assert secret not in repr(error)
+    assert all(secret not in repr(event) for event in events)
+
+
+def test_real_executor_streams_sanitized_mcp_phase_before_process_exit(tmp_path):
+    event = {
+        "type": "item.started",
+        "item": {
+            "type": "mcp_tool_call",
+            "server": "yigdesk",
+            "tool": "get_deal_context",
+            "arguments": {"must_not_reach_callback": "sensitive"},
+        },
+    }
+    script = (
+        "import time; "
+        f"print({json.dumps(json.dumps(event))}, flush=True); "
+        "time.sleep(0.3)"
+    )
+    observations = []
+
+    completed = _execute(
+        [sys.executable, "-c", script],
+        env=os.environ.copy(),
+        timeout=2,
+        cwd=tmp_path,
+        trace_callback=lambda phase: observations.append((phase, time.perf_counter())),
+    )
+    finished = time.perf_counter()
+
+    assert completed.returncode == 0
+    assert [phase for phase, _observed_at in observations] == [
+        "calling_yigdesk_tools"
+    ]
+    assert finished - observations[0][1] >= 0.1
+
+
+def test_runner_rejects_unknown_reasoning_effort():
+    with pytest.raises(ValueError, match="reasoning effort"):
+        CodexRunner(reasoning_effort="fastest")
 
 
 def test_runner_rejects_codex_number_drift_even_with_valid_tool_trace(tmp_path):
@@ -190,8 +364,26 @@ def test_runner_rejects_codex_number_drift_even_with_valid_tool_trace(tmp_path):
     )
     runner = CodexRunner(executor=executor_with(drifted), temp_root=tmp_path)
 
-    with pytest.raises(AgentVerificationError, match="gross_margin"):
+    with pytest.raises(AgentVerificationError, match="gross_margin") as caught:
         runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+
+    assert caught.value.code == "AGENT_METRIC_MISMATCH"
+
+
+def test_runner_classifies_explanatory_evidence_text_without_leaking_it(tmp_path):
+    sensitive_explanation = "I inspected the canonical address Deal Model!B4."
+    runner = CodexRunner(
+        executor=executor_with(
+            agent_answer(inspected_evidence=sensitive_explanation)
+        ),
+        temp_root=tmp_path,
+    )
+
+    with pytest.raises(AgentVerificationError) as caught:
+        runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+
+    assert caught.value.code == "AGENT_EVIDENCE_MISMATCH"
+    assert sensitive_explanation not in str(caught.value)
 
 
 def test_runner_rejects_reordered_mcp_calls(tmp_path):

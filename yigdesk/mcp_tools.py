@@ -33,12 +33,14 @@ class YigdeskToolClient:
         return {
             "scenario_id": payload["scenario_id"],
             "request": payload["scenario"],
+            "source": payload.get("source"),
             "workbook": {
                 "fingerprint": workbook["fingerprint"],
                 "mode": workbook["mode"],
                 "evidence_addresses": [cell["address"] for cell in workbook["cells"]],
             },
             "capabilities": payload["capabilities"],
+            "decision_capabilities": payload.get("decision_capabilities", []),
             "revision": payload.get("revision"),
         }
 
@@ -52,6 +54,38 @@ class YigdeskToolClient:
                 "get_deal_context, for example 'Deal Model!B4'."
             )
         return self._request(f"/api/inspect?address={quote(address)}")
+
+    def evaluate_proposal(self, requested_discount_pct: str) -> dict[str, Any]:
+        return self._request(
+            "/api/proposals/evaluate",
+            {"requested_discount_pct": requested_discount_pct},
+        )
+
+    def compare_proposals(self, discounts_pct: list[str]) -> dict[str, Any]:
+        return self._request(
+            "/api/proposals/compare", {"discounts_pct": discounts_pct}
+        )
+
+    def find_feasible_boundary(self, step_pct: str = "0.01") -> dict[str, Any]:
+        return self._request(
+            f"/api/proposals/boundary?step_pct={quote(str(step_pct))}"
+        )
+
+    def stress_test_assumption(
+        self,
+        requested_discount_pct: str,
+        cogs_change_pct: str,
+    ) -> dict[str, Any]:
+        return self._request(
+            "/api/proposals/stress-test",
+            {
+                "requested_discount_pct": requested_discount_pct,
+                "cogs_change_pct": cogs_change_pct,
+            },
+        )
+
+    def list_missing_evidence(self) -> dict[str, Any]:
+        return self._request("/api/evidence/missing")
 
     def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
