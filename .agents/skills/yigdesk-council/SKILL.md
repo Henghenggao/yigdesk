@@ -1,13 +1,13 @@
 ---
 name: yigdesk-council
-description: Turn one natural-language discount request into a real local blackboard run - bind the synthetic workbook into an immutable scenario, open a decision, spawn the four Codex council roles over the six blackboard ops (read_board, propose_candidate, post_claim), then let the deterministic gate cast approval and resolve, and return the committed DecisionRecord. Use when the user asks to analyze a synthetic workbook, decide whether a discount such as 2% makes sense, find the financially safe percentage, challenge a proposal with subagents, or run the Yigdesk decision-council demo without leaving Codex.
+description: Turn one natural-language discount request into a real local blackboard run - bind the synthetic workbook into an immutable session, open a decision on the packaged demo scenario, spawn the four Codex council roles over the six blackboard ops (read_board, propose_candidate, post_claim), then let the deterministic gate cast approval and resolve, and return the committed DecisionRecord. Use when the user asks to analyze a synthetic workbook, decide whether a discount such as 2% makes sense, find the financially safe percentage, challenge a proposal with subagents, or run the Yigdesk decision-council demo without leaving Codex.
 ---
 
 # Yigdesk Council
 
 Turn one natural-language request into a real local decision flow: bind the
-synthetic workbook into an immutable scenario, open a decision on the deterministic
-blackboard, coordinate the project's specialist Codex agents over the six blackboard
+synthetic workbook into an immutable session, open a decision on the deterministic
+blackboard's packaged demo scenario, coordinate the project's specialist Codex agents over the six blackboard
 ops, and let the deterministic gate - not the model - close the decision. The board
 is an append-only ledger, so the ledger itself is the audit and the committed
 DecisionRecord is the outcome. The browser is an optional evidence view, not a
@@ -29,7 +29,7 @@ required control surface.
 
 ## 1. Resolve the request
 
-First, if the request says "uploaded", "current", or "bound revision", run
+First, if the request says "uploaded", "current", or "bound upload", run
 `python -m yigdesk.cli state` before asking a question. Reuse an active uploaded
 session when its state already contains the requested decision inputs; the immutable
 session manifest is authoritative for the file path and values.
@@ -63,22 +63,30 @@ python -m yigdesk.cli bind --file <absolute-xlsx-path> --discount <submitted> --
 Require JSON status `BOUND`, `analysis_bytes_unchanged: true`, a session id, source
 fingerprint, projection fingerprint, and source-cell count. A rejected bind must not
 replace the prior active scenario. Do not delete or edit anything under
-`runtime/sessions/`. The reused importer turns this bound upload into the immutable
-scenario the blackboard prices against.
+`runtime/sessions/`. The session importer and T2's `source_for_active_session` adapter
+are reused, but the board does not price this bound upload yet (see Section 3); binding
+currently establishes session integrity, not the priced board scenario.
 
-## 3. Point the blackboard at the bound scenario
+## 3. Point the blackboard at the demo scenario
 
 The blackboard MCP server (`python -m yigdesk.blackboard_mcp`) reads two env vars:
 `YIGDESK_SCENARIO`, the path to an immutable scenario directory holding `model.json`
-and its workbook (the default is `data/scenarios/council_discount/`), and
-`YIGDESK_LEDGER`, the append-only board ledger (default `runtime/board.jsonl`). Point
-`YIGDESK_SCENARIO` at the default council scenario, or at the scenario the reused
-importer produced from the bound upload; the role agents inherit both env vars from the
-project MCP config.
+and its workbook, and `YIGDESK_LEDGER`, the append-only board ledger (default
+`runtime/board.jsonl`). For now the council prices the packaged demo scenario only: set
+`YIGDESK_SCENARIO` to `data/scenarios/council_discount/`. The role agents inherit both
+env vars from the project MCP config.
 
-Run `python -m yigdesk.cli state` and require its session id and source fingerprint to
-equal the bind receipt or reused active-session identity before spawning agents. The
-optional read app (`python -m yigdesk.app`, `http://127.0.0.1:8787`) is only an
+Pricing an uploaded binding on the live board is not yet wired, so it is not an option
+here. The session importer and T2's `source_for_active_session` adapter still exist and
+can build a `ModelSource` from a bound upload, but `yigdesk.blackboard_mcp` does not
+consume that adapter yet - it only reads a static `YIGDESK_SCENARIO` directory. Do not
+point `YIGDESK_SCENARIO` at anything but the demo scenario, and when a user uploads
+their own workbook, say plainly that this council run prices the demo scenario until the
+upload-to-board wiring lands (a known follow-up).
+
+The bind/session/state steps above stay useful for session integrity only: run
+`python -m yigdesk.cli state` to confirm the active session matches its bind receipt.
+The optional read app (`python -m yigdesk.app`, `http://127.0.0.1:8787`) is only an
 evidence view; do not make the user open it to obtain the answer.
 
 ## Council latency contract
@@ -94,10 +102,12 @@ context; it does not enable Fast mode or launch a nested `codex exec`.
 
 ## 4. Open the decision and run the council over the six ops
 
-The council speaks exactly six blackboard ops. The role agents get only read_board,
-propose_candidate, and post_claim; open_decision, cast_approval, and request_resolve
-stay with the orchestrator, so a role agent can never open, approve, or resolve - only
-the deterministic gate closes a decision.
+The council speaks exactly six blackboard ops. Collectively the role agents use at most
+three of them - read_board, propose_candidate, and post_claim - and no single role uses
+all three (finance and sales price candidates; risk adds a claim; the optimizer only
+reads and claims). open_decision, cast_approval, and request_resolve stay with the
+orchestrator, so a role agent can never open, approve, or resolve - only the
+deterministic gate closes a decision.
 
 1. As the orchestrator, `open_decision` for the discount question, passing the decision
    id, the question, decision_type `council_discount`, and the scenario policy
@@ -168,4 +178,4 @@ consequences rather than recomputing them in prose.
 - "用我上传的合成 Excel 判断 Northwind 的 2% 折扣是否合理，底线 30%。"
 - "让 finance、sales、risk 相互 challenge，再告诉我安全的折扣是多少。"
 - "跑一次真实 Yigdesk 决策黑板 demo，全程留在 Codex。"
-- "基于当前绑定版本，把 2% 改成 2.2% 再重新评估。"
+- "基于当前绑定，把 2% 改成 2.2% 再重新评估。"

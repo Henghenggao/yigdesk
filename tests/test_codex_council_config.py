@@ -24,6 +24,16 @@ ROLE_TOOLS = {
     "decision_optimizer": {"read_board", "post_claim"},
 }
 
+# enabled_tools caps *which* ops a persona may call, but not *how many* calls it
+# makes. Each persona commits to an exact Yigdesk call count in prose; pin it so a
+# silently added call (the field most likely to regress) is caught.
+ROLE_CALL_COUNTS = {
+    "finance_analyst": "Make exactly two Yigdesk calls",
+    "sales_advocate": "Make exactly three Yigdesk calls",
+    "risk_challenger": "Make exactly three Yigdesk calls",
+    "decision_optimizer": "Make exactly two Yigdesk calls",
+}
+
 # The retired read-only 8-tool surface must not survive anywhere in a persona.
 RETIRED_TOOLS = (
     "get_deal_context",
@@ -79,6 +89,12 @@ def test_council_agents_pin_low_latency_reasoning_on_the_real_work_path(agent_na
     assert mcp["required"] is True
     assert set(mcp["enabled_tools"]) == ROLE_TOOLS[agent_name]
     assert set(mcp["env_vars"]) == {"YIGDESK_SCENARIO", "YIGDESK_LEDGER"}
+
+
+@pytest.mark.parametrize("agent_name", AGENT_NAMES)
+def test_persona_pins_its_exact_yigdesk_call_count(agent_name):
+    instructions = _agent(agent_name)["developer_instructions"]
+    assert ROLE_CALL_COUNTS[agent_name] in instructions
 
 
 def test_project_council_explicitly_disables_fast_mode():
