@@ -141,6 +141,17 @@ def test_private_engine_name_is_absent_from_shipped_surface():
         if superpowers not in path.parents and not _skipped(path)
     ]
     surface += [path for path in (ROOT / "tests").rglob("*.py") if not _skipped(path)]
+    # The council Domain App surface (personas, skill, agent contract, notice) is
+    # shipped too and must stay free of the private engine's name.
+    surface += [ROOT / "AGENTS.md", ROOT / "NOTICE"]
+    for config_dir in (ROOT / ".codex", ROOT / ".agents"):
+        surface += [
+            path
+            for path in config_dir.rglob("*")
+            if path.is_file()
+            and path.suffix in {".toml", ".md", ".yaml", ".yml"}
+            and not _skipped(path)
+        ]
 
     hits = sorted(
         str(path.relative_to(ROOT))

@@ -43,6 +43,7 @@ RETIRED_TOOLS = (
     "list_missing_evidence",
     "stress_test_assumption",
     "compare_proposals",
+    "preview_consequence",
 )
 
 
