@@ -47,7 +47,7 @@ class DemoState:
     lock: threading.RLock = field(default_factory=threading.RLock)
     current_scenario: dict[str, Any] = field(init=False)
     active_source_path: Path = field(init=False)
-    active_workbook_path: Path = field(init=False)
+    active_workbook_path: Path | None = field(init=False, default=None)
     bound_session_id: str | None = field(init=False, default=None)
     bound_revision_id: str | None = field(init=False, default=None)
     observed_session_id: str | None = field(init=False, default=None)
@@ -61,7 +61,6 @@ class DemoState:
         self.scenario_id = bound.manifest["scenario_id"]
         self.current_scenario = deepcopy(bound.manifest["scenario"])
         self.active_source_path = bound.source_path
-        self.active_workbook_path = bound.projection_path
         self.source = deepcopy(bound.manifest["source"])
         self.bound_session_id = bound.session_id
         self.bound_revision_id = bound.manifest["revision_id"]

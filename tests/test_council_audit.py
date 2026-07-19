@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from decimal import Decimal
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -42,12 +43,19 @@ def _policy() -> dict:
     return json.loads((SCENARIO / "policy.json").read_text(encoding="utf-8"))
 
 
+def _headroom_after(candidate) -> str:
+    """The priced 'after' headroom of a candidate's consequence."""
+
+    return next(m.after for m in candidate.consequence.metrics if m.id == "headroom")
+
+
 def _blackboard(tmp_path):
     """Blackboard on the real council_discount model + policy over a tmp ledger.
 
     The source workbook carries the canonical council figures (list ARR 1000k,
-    COGS 480k, floor 40pt) so a 12% discount prices to +5.45pt headroom and a 2%
-    discount to +11.02pt — both feasible, so ``max:headroom`` has a real choice.
+    COGS 480k, floor 40pt) so a 2% discount prices to +11.02pt headroom and a
+    12% discount to +5.45pt — both feasible, so ``max:headroom`` has a real
+    contest to decide.
     """
 
     model = _model()
@@ -67,17 +75,22 @@ def _blackboard(tmp_path):
 
 def _drive(bb, *, with_claim: bool = True, with_approval: bool = True) -> None:
     """Open a council decision with two priced candidates, and (by default) the
-    grounded risk claim and CFO approval the council policy requires."""
+    grounded risk claim and CFO approval the council policy requires.
+
+    The higher-headroom candidate (c1, 2% discount) is proposed FIRST so a
+    hypothetical "pick the last eligible candidate" selector bug can't quietly
+    return the right answer.
+    """
 
     bb.open_decision(
         "d1", "Approve the requested discount?", "council_discount", _policy(),
         actor="human:cfo", role="owner",
     )
     bb.propose_candidate(
-        "d1", "c1", {"overrides": {"discount": 12}}, actor="agent:finance", role="proposer"
+        "d1", "c1", {"overrides": {"discount": 2}}, actor="agent:finance", role="proposer"
     )
     bb.propose_candidate(
-        "d1", "c2", {"overrides": {"discount": 2}}, actor="agent:sales", role="proposer"
+        "d1", "c2", {"overrides": {"discount": 12}}, actor="agent:sales", role="proposer"
     )
     if with_claim:
         claim = bb.post_claim(
@@ -89,22 +102,32 @@ def _drive(bb, *, with_claim: bool = True, with_approval: bool = True) -> None:
         # The claim must be grounded in a real evidence cell to count.
         assert claim.status == "grounded"
     if with_approval:
-        bb.cast_approval("d1", "approve", "c2", actor="human:cfo", role="cfo")
+        bb.cast_approval("d1", "approve", "c1", actor="human:cfo", role="cfo")
 
 
 def test_gate_commits_a_grounded_decision_record_chosen_by_policy(tmp_path):
     bb, evaluator = _blackboard(tmp_path)
     _drive(bb)
 
+    candidates = bb.project().decisions["d1"].candidates
+    # Both candidates price to "ok", so max:headroom is a genuine two-way
+    # contest — a future floor/model change that makes one infeasible can't
+    # silently degrade this into a single-candidate pick that still passes.
+    assert candidates["c1"].consequence.verdict == "ok"
+    assert candidates["c2"].consequence.verdict == "ok"
+    # c1 (proposed first) is the strictly-higher-headroom option; the winner is
+    # therefore neither the only eligible candidate nor the last-proposed one.
+    assert Decimal(_headroom_after(candidates["c1"])) > Decimal(_headroom_after(candidates["c2"]))
+
     record = bb.request_resolve("d1", actor="human:cfo", role="cfo")
 
     assert not isinstance(record, Pending)
-    # max:headroom picks the higher-headroom candidate; the policy closes it.
-    assert record.chosen_candidate_id == "c2"
+    # The policy closes on the genuinely-higher-headroom candidate.
+    assert record.chosen_candidate_id == "c1"
     assert record.closed_by == "policy"
     assert record.rationale == "selector=max:headroom"
     # Grounded evidence + evaluator/source provenance are all in the record.
-    chosen = bb.project().decisions["d1"].candidates["c2"]
+    chosen = candidates["c1"]
     assert record.evidence_refs == chosen.consequence.evidence_refs
     assert record.evidence_refs  # non-empty: the priced inputs are cited
     assert record.source_fingerprint == chosen.consequence.fingerprint
@@ -125,12 +148,13 @@ def test_append_only_ledger_replays_to_the_same_record(tmp_path):
     # The resolved op carries the full record: the ledger IS the audit trail.
     assert ops[-1].kind == RESOLVED
     assert ops[-1].payload["record"] == asdict(record)
-    # Deterministic replay from disk reconstructs the identical board + record.
+    # Deterministic replay from disk reconstructs the identical board + record,
+    # matching the live in-memory projection field for field.
     replay = fold(Ledger(tmp_path / "board.jsonl").read())
     decision = replay.decisions["d1"]
     assert decision.status == "resolved"
     assert decision.resolution == record
-    assert fold(ops) == fold(ops)
+    assert replay == bb.project()
 
 
 def test_missing_required_risk_claim_holds_instead_of_closing(tmp_path):
