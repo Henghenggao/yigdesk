@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from yigdesk.a2a import CouncilAuditError, EXPECTED_TOOL_SEQUENCES, verify_council_audit
+from yigdesk.a2a import (
+    CouncilAuditError,
+    EXPECTED_TOOL_SEQUENCES,
+    council_audit_status,
+    verify_council_audit,
+)
 
 
 def events_for(actor, tools, *, packet="packet-1"):
@@ -51,6 +56,39 @@ def test_verifier_accepts_exact_role_sequences_on_one_revision():
     assert result["accepted_call_count"] == 15
     assert result["observed_call_count"] == 15
     assert set(result["roles"]) == set(EXPECTED_TOOL_SEQUENCES)
+
+
+def test_council_status_reports_partial_role_progress_without_tool_arguments():
+    events = [
+        *events_for(
+            "finance_analyst",
+            ["get_deal_context", "find_feasible_boundary"],
+        ),
+        *events_for("sales_advocate", ["get_deal_context"]),
+    ]
+
+    status = council_audit_status(events)
+
+    assert status["status"] == "running"
+    assert status["observed_call_count"] == 3
+    assert status["accepted_progress_count"] == 3
+    assert status["roles"]["finance_analyst"] == {
+        "state": "running",
+        "completed": 2,
+        "expected": 4,
+        "tools": ["get_deal_context", "find_feasible_boundary"],
+    }
+    assert status["roles"]["decision_optimizer"]["state"] == "pending"
+    assert "step_pct" not in str(status)
+
+
+def test_council_status_promotes_only_a_fully_verified_audit():
+    status = council_audit_status(complete_audit())
+
+    assert status["status"] == "verified"
+    assert status["verified"] is True
+    assert status["accepted_progress_count"] == 15
+    assert status["revision"]["revision_id"] == "revision-1"
 
 
 def test_verifier_keeps_an_earlier_nonconforming_attempt_visible():

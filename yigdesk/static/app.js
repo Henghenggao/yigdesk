@@ -9,6 +9,8 @@ const state = {
   agentRun: null,
   source: null,
   council: null,
+  councilStatus: null,
+  councilPollTimer: null,
   copyResetTimer: null,
 };
 const byId = (id) => document.getElementById(id);
@@ -73,11 +75,11 @@ function configureAgent(agent) {
   };
   const label = byId("analyze").querySelector(".action-label");
   if (state.agent.available) {
-    label.textContent = "Analyze with Codex";
-    byId("read-wall").innerHTML = '<span aria-hidden="true">&#9673;</span> Codex is tool-limited; analysis can never alter the source';
+    label.textContent = "Analyze with nested Codex";
+    byId("read-wall").innerHTML = '<span aria-hidden="true">&#9673;</span> Optional nested Codex harness · standard tier · read only';
   } else {
     label.textContent = "Preview consequence locally";
-    byId("read-wall").innerHTML = '<span aria-hidden="true">&#9673;</span> Codex runtime is not configured · local deterministic preview';
+    byId("read-wall").innerHTML = '<span aria-hidden="true">&#9673;</span> Codex Work calls Yigdesk MCP directly · this button is a local deterministic preview';
   }
 }
 
@@ -121,6 +123,56 @@ function revokeProof() {
   byId("a2a-intro").textContent = "Run the consequence preview to expose proposal, boundary, rounding, and stress-test facts. These are deterministic tool results—not simulated agent dialogue.";
   byId("board-revision").textContent = "revision · pending";
   byId("copy-council").disabled = true;
+}
+
+function renderCouncilStatus(status) {
+  state.councilStatus = status;
+  const roles = status.roles || {};
+  document.querySelectorAll("[data-council-actor]").forEach((item) => {
+    const currentExpected = Number(item.querySelector("strong").textContent.split("/")[1] || 0);
+    const role = roles[item.dataset.councilActor] || {
+      state: "pending",
+      completed: 0,
+      expected: currentExpected,
+    };
+    item.dataset.state = role.state;
+    item.querySelector("strong").textContent = `${role.completed}/${role.expected}`;
+  });
+  if (status.status === "verified") {
+    byId("a2a-state").textContent = "A2A VERIFIED";
+    byId("a2a-intro").textContent = "Codex Work completed the real actor-attributed council audit on this immutable revision. All accepted calls passed the independent verifier.";
+    return;
+  }
+  if (status.status === "running") {
+    byId("a2a-state").textContent = `COUNCIL ${status.accepted_progress_count}/${status.expected_call_count}`;
+    byId("a2a-intro").textContent = "Codex Work is calling the shared Yigdesk MCP directly. This progress comes from the session audit, not simulated agent dialogue.";
+    return;
+  }
+  if (status.status === "rejected") {
+    byId("a2a-state").textContent = "AUDIT REJECTED";
+    byId("a2a-intro").textContent = "The observed Codex Work trace did not match the active revision, so no council result is released.";
+    return;
+  }
+  if (status.status === "idle") {
+    byId("a2a-state").textContent = "CODEX WORK READY";
+    byId("a2a-intro").textContent = "Ask Codex to use $yigdesk-council for the current bound revision. The browser will follow the real MCP audit automatically.";
+    return;
+  }
+  byId("a2a-state").textContent = "BIND A REVISION";
+  byId("a2a-intro").textContent = "Upload a generated synthetic workbook here or bind one through $yigdesk-council before starting the agents.";
+}
+
+async function refreshCouncilStatus() {
+  try {
+    renderCouncilStatus(await session.getCouncilStatus());
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function pollCouncilStatus() {
+  await refreshCouncilStatus();
+  state.councilPollTimer = window.setTimeout(pollCouncilStatus, 1000);
 }
 
 function setEmptyDecision(heading, message) {
@@ -304,6 +356,7 @@ async function uploadWorkbook(event) {
     clearPreview();
     renderStory(payload);
     await byId("workbook-grid").refresh();
+    await refreshCouncilStatus();
     status.dataset.state = "ready";
     status.textContent = `${payload.source.filename} · ${(payload.source.size_bytes / 1024 / 1024).toFixed(2)} MB · ${payload.source.extraction.revenue_cells.length + payload.source.extraction.cogs_cells.length} FY2024 source cells · sha256 ${payload.source.sha256.slice(0, 12)}`;
   } catch (error) {
@@ -318,7 +371,7 @@ async function uploadWorkbook(event) {
 async function copyCouncilPrompt() {
   if (!state.council || !state.packet) return;
   const packet = state.packet;
-  const prompt = `Use the project Yigdesk decision council for the current Northwind request. Spawn finance_analyst, sales_advocate, and risk_challenger in parallel. On every call pass the matching actor. Finance must make exactly: get_deal_context, find_feasible_boundary(0.01), evaluate_proposal(submitted), inspect_evidence(Deal Model!B4). Sales must make exactly: get_deal_context, evaluate_proposal(submitted), evaluate_proposal(one alternative). Risk must make exactly: get_deal_context, list_missing_evidence, find_feasible_boundary(0.01), stress_test_assumption(submitted,+5% COGS), inspect_evidence(Deal Model!B4). Require revision_id ${packet.revision_id}, source_fingerprint ${packet.source_fingerprint}, and packet_id ${packet.packet_id} from all three, then spawn decision_optimizer for exactly: get_deal_context, compare_proposals(unique role proposals), inspect_evidence(Deal Model!B4). No other Yigdesk calls. Distinguish financial feasibility from commercial optimality; do not invent market evidence and do not approve, send, or write back.`;
+  const prompt = `Use $yigdesk-council on the current bound Yigdesk revision. Keep orchestration in this Codex Work task; do not start a nested codex exec. Spawn finance_analyst, sales_advocate, and risk_challenger in parallel. On every call pass the matching actor. Finance must make exactly: get_deal_context, find_feasible_boundary(0.01), evaluate_proposal(submitted), inspect_evidence(Deal Model!B4). Sales must make exactly: get_deal_context, evaluate_proposal(submitted), evaluate_proposal(one alternative). Risk must make exactly: get_deal_context, list_missing_evidence, find_feasible_boundary(0.01), stress_test_assumption(submitted,+5% COGS), inspect_evidence(Deal Model!B4). Require revision_id ${packet.revision_id}, source_fingerprint ${packet.source_fingerprint}, and packet_id ${packet.packet_id} from all three, then spawn decision_optimizer for exactly: get_deal_context, compare_proposals(submitted, sales alternative, largest safe step, first unsafe), inspect_evidence(Deal Model!B4). No other Yigdesk calls. Distinguish financial feasibility from commercial optimality; do not invent market evidence and do not approve, send, or write back.`;
   try {
     await navigator.clipboard.writeText(prompt);
     byId("copy-council").firstChild.textContent = "Council prompt copied ";
@@ -329,7 +382,7 @@ async function copyCouncilPrompt() {
 
 async function runWithCodex(label) {
   let run = await session.startAgentRun(state.agent?.request_token);
-  const deadline = Date.now() + 130000;
+  const deadline = Date.now() + 120000;
   const phaseLabels = {
     starting_codex: "Codex · starting…",
     calling_yigdesk_tools: "Codex · calling Yigdesk tools…",
@@ -389,6 +442,7 @@ async function chooseScenario(scenarioId) {
     clearPreview();
     renderStory(payload);
     await byId("workbook-grid").refresh();
+    await refreshCouncilStatus();
     byId("upload-status").dataset.state = "";
     byId("upload-status").textContent = "Built-in synthetic fixture restored.";
   } finally {
@@ -446,4 +500,5 @@ document.addEventListener("DOMContentLoaded", async () => {
   const payload = await demoApi("/api/state");
   clearPreview();
   renderStory(payload);
+  await pollCouncilStatus();
 });

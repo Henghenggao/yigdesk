@@ -50,6 +50,7 @@ def bind_synthetic_session(
     margin_floor_pct: Decimal,
     current_discount_pct: Decimal = Decimal("0"),
     session_id: str | None = None,
+    original_filename: str | None = None,
 ) -> dict[str, Any]:
     """Validate a synthetic workbook and atomically make a copied revision active."""
 
@@ -57,7 +58,7 @@ def bind_synthetic_session(
     runtime_root = Path(runtime_root).expanduser().resolve()
     imported = import_synthetic_workbook(
         source_path,
-        original_filename=source_path.name,
+        original_filename=original_filename or source_path.name,
         requested_discount_pct=requested_discount_pct,
         margin_floor_pct=margin_floor_pct,
         current_discount_pct=current_discount_pct,
@@ -105,7 +106,7 @@ def bind_synthetic_session(
             "scenario": imported.scenario,
             "source": {
                 **imported.source,
-                "filename": source_path.name,
+                "filename": original_filename or source_path.name,
                 "sha256": source_fingerprint,
                 "session_file": "source.xlsx",
                 "source_cell_count": source_cell_count,
@@ -139,7 +140,7 @@ def bind_synthetic_session(
         "source_fingerprint": source_fingerprint,
         "projection_fingerprint": projection_fingerprint,
         "source": {
-            "filename": source_path.name,
+            "filename": original_filename or source_path.name,
             "source_cell_count": source_cell_count,
             "analysis_bytes_unchanged": source_path.read_bytes()
             == (session_dir / "source.xlsx").read_bytes(),

@@ -12,7 +12,8 @@ requirements; Devpost registration, the public video URL, and the Codex
 - [x] Python 3.11+ and Node.js setup instructions.
 - [x] Generated synthetic sample-data command; no customer or production data.
 - [x] Real browser upload and file-analysis flow.
-- [x] Real local Codex + MCP tool-use path with no silent fallback.
+- [x] Real Codex Work + MCP tool-use path on the browser-uploaded immutable session.
+- [x] Optional bounded nested harness with no silent fallback and no Fast tier.
 - [x] Real project-scoped Codex subagent roles and shared revision protocol.
 - [x] Read-only safety boundary, HOLD path, and exact-vs-display rounding test.
 - [x] Python, MCP protocol, browser, container, and CI coverage.

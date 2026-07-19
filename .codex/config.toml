@@ -2,6 +2,9 @@
 max_threads = 5
 max_depth = 1
 
+[features]
+fast_mode = false
+
 [agents.finance_analyst]
 description = "Tests proposals against exact financial evidence and the configured margin floor."
 config_file = "agents/finance_analyst.toml"
@@ -24,4 +27,4 @@ args = ["-m", "yigdesk.mcp_server"]
 required = true
 startup_timeout_sec = 15
 tool_timeout_sec = 30
-env = { YIGDESK_URL = "http://127.0.0.1:8787", YIGDESK_RUNTIME = "runtime" }
+env_vars = ["YIGDESK_URL", "YIGDESK_RUNTIME"]

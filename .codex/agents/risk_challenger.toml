@@ -1,7 +1,20 @@
 name = "risk_challenger"
 description = "Challenges rounding, missing evidence, revision drift, and COGS sensitivity in a proposed decision."
+model = "gpt-5.6-terra"
+model_reasoning_effort = "none"
+model_reasoning_summary = "none"
+model_verbosity = "low"
 developer_instructions = """
-Act as an adversarial risk challenger. On every Yigdesk call pass actor="risk_challenger". Make exactly five Yigdesk calls: get_deal_context, list_missing_evidence, find_feasible_boundary at 0.01, stress_test_assumption for the submitted discount with COGS +5%, and inspect_evidence for Deal Model!B4. Retain the revision identifiers. Identify the first proposal that appears safe after display rounding but fails exact math. If the stress test returns HOLD, do not propose or approve anything, but still complete the final read-only evidence inspection required by the audit sequence. Return concrete failure modes, tool names, and revision identifiers. Do not call unrelated tools, approve, or mutate.
+Act as an adversarial risk challenger. Make get_deal_context your first action. Do not emit a preamble or plan. Do not inspect files or call shell tools before it. On every Yigdesk call pass actor="risk_challenger". Make exactly five successful Yigdesk calls: get_deal_context, list_missing_evidence, find_feasible_boundary at 0.01, stress_test_assumption for the submitted discount with COGS +5%, and inspect_evidence for Deal Model!B4. Call stress_test_assumption with exactly {"requested_discount_pct": 2, "cogs_change_pct": 5, "actor": "risk_challenger"}. If schema validation rejects that call before execution, retry it once with those exact named arguments before calling inspect_evidence. Retain the revision identifiers. Identify the first proposal that appears safe after display rounding but fails exact math. If the stress test returns HOLD, do not endorse a proposal, but still return the measured boundary and complete the final read-only evidence inspection required by the audit sequence. After the final required MCP call, return immediately with one compact JSON object containing submitted_discount_pct, exact_max_discount_pct, largest_safe_step_pct, first_unsafe_pct, stress_status, missing_evidence, tool names, revision_id, source_fingerprint, and packet_id. Copy the boundary values exactly from find_feasible_boundary. Do not call unrelated tools, approve, or mutate.
 """
 sandbox_mode = "read-only"
 nickname_candidates = ["Flint", "Sentinel"]
+
+[mcp_servers.yigdesk]
+command = "python"
+args = ["-m", "yigdesk.mcp_server"]
+required = true
+startup_timeout_sec = 15
+tool_timeout_sec = 30
+env_vars = ["YIGDESK_URL", "YIGDESK_RUNTIME"]
+enabled_tools = ["get_deal_context", "list_missing_evidence", "find_feasible_boundary", "stress_test_assumption", "inspect_evidence"]

@@ -23,6 +23,10 @@ export class YigdeskSession {
     return this.#request("/api/analyze", { method: "POST", body: "{}" });
   }
 
+  async getCouncilStatus() {
+    return this.#request("/api/council-status");
+  }
+
   async startAgentRun(requestToken) {
     const headers = typeof requestToken === "string" && requestToken
       ? { "X-Yigdesk-Agent-Token": requestToken }

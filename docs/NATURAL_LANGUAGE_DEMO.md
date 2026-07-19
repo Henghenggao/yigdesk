@@ -28,9 +28,35 @@ Codex then performs the real workflow without asking the user to switch windows:
 6. The independent audit verifier requires 15 accepted, actor-attributed calls before
    Codex releases the decision brief.
 
+## Browser-uploaded start
+
+For a video that visibly demonstrates real upload parsing, start the app, upload the
+generated workbook at <http://127.0.0.1:8787>, and set the request inputs there. The
+upload creates the active immutable session; it is not a browser-only copy. Then say
+in the repository's existing Codex task:
+
+```text
+Use $yigdesk-council on the current bound Yigdesk revision. Keep orchestration in
+this Codex Work task and return only an audit-verified recommendation.
+```
+
+The Skill reads the active identity before asking for inputs and reuses it when the
+workbook and decision values are unchanged. While the council runs, the browser polls
+only safe role/call-count status from the same session audit. Its finance, sales, risk,
+and optimizer progress is therefore real MCP activity, not animated agent dialogue.
+The optional nested single-agent browser harness is not part of this path.
+
 The brief separates a financially feasible ceiling from a commercially supported
 recommendation. With no market evidence, Yigdesk must not label the highest feasible
 discount as commercially optimal.
+
+The repository's real performance E2E keeps the same data flow and a hard 120-second
+process budget. It uses `gpt-5.6-terra` on standard service tier with Fast explicitly
+disabled, pins the four project agents and outer orchestrator to
+`model_reasoning_effort="none"`, and
+requires both the 15-call audit and an identity-bound candidate JSON. The harness—not
+the outer model turn—performs the final audit check after Codex exits, so verification
+does not consume another model round trip.
 
 ## Natural follow-ups
 
@@ -72,6 +98,7 @@ python -m yigdesk.app
 python -m yigdesk.cli state
 python -m yigdesk.cli analyze
 python -m scripts.verify_a2a_audit
+python -m scripts.run_real_council_e2e --runtime runtime --timeout-seconds 120 --acknowledge-data-sharing
 ```
 
 Every session lives under ignored `runtime/sessions/`. Never edit or delete a session
