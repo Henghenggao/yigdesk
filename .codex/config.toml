@@ -6,25 +6,25 @@ max_depth = 1
 fast_mode = false
 
 [agents.finance_analyst]
-description = "Tests proposals against exact financial evidence and the configured margin floor."
+description = "Prices the submitted discount as a grounded blackboard candidate."
 config_file = "agents/finance_analyst.toml"
 
 [agents.sales_advocate]
-description = "Frames customer-friendly alternatives without inventing commercial evidence."
+description = "Proposes the submitted discount and one customer-friendly alternative as candidates."
 config_file = "agents/sales_advocate.toml"
 
 [agents.risk_challenger]
-description = "Challenges rounding, missing evidence, revision drift, and COGS sensitivity."
+description = "Proposes a boundary candidate and posts a grounded risk claim on COGS sensitivity and rounding."
 config_file = "agents/risk_challenger.toml"
 
 [agents.decision_optimizer]
-description = "Synthesizes revision-consistent role outputs without confusing feasibility with optimality."
+description = "Posts a non-binding advisory claim; the deterministic gate, not the optimizer, closes the decision."
 config_file = "agents/decision_optimizer.toml"
 
 [mcp_servers.yigdesk]
 command = "python"
-args = ["-m", "yigdesk.mcp_server"]
+args = ["-m", "yigdesk.blackboard_mcp"]
 required = true
 startup_timeout_sec = 15
 tool_timeout_sec = 30
-env_vars = ["YIGDESK_URL", "YIGDESK_RUNTIME"]
+env_vars = ["YIGDESK_SCENARIO", "YIGDESK_LEDGER"]

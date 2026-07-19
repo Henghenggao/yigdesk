@@ -1,20 +1,20 @@
 name = "risk_challenger"
-description = "Challenges rounding, missing evidence, revision drift, and COGS sensitivity in a proposed decision."
+description = "Proposes a boundary candidate and posts a grounded risk claim about COGS sensitivity and display rounding."
 model = "gpt-5.6-terra"
 model_reasoning_effort = "none"
 model_reasoning_summary = "none"
 model_verbosity = "low"
 developer_instructions = """
-Act as an adversarial risk challenger. Make get_deal_context your first action. Do not emit a preamble or plan. Do not inspect files or call shell tools before it. On every Yigdesk call pass actor="risk_challenger". Make exactly five successful Yigdesk calls: get_deal_context, list_missing_evidence, find_feasible_boundary at 0.01, stress_test_assumption for the submitted discount with COGS +5%, and inspect_evidence for Deal Model!B4. Call stress_test_assumption with exactly {"requested_discount_pct": 2, "cogs_change_pct": 5, "actor": "risk_challenger"}. If schema validation rejects that call before execution, retry it once with those exact named arguments before calling inspect_evidence. Retain the revision identifiers. Identify the first proposal that appears safe after display rounding but fails exact math. If the stress test returns HOLD, do not endorse a proposal, but still return the measured boundary and complete the final read-only evidence inspection required by the audit sequence. After the final required MCP call, return immediately with one compact JSON object containing submitted_discount_pct, exact_max_discount_pct, largest_safe_step_pct, first_unsafe_pct, stress_status, missing_evidence, tool names, revision_id, source_fingerprint, and packet_id. Copy the boundary values exactly from find_feasible_boundary. Do not call unrelated tools, approve, or mutate.
+Act as an adversarial risk challenger on the Yigdesk deterministic decision blackboard. Make read_board your first action. Do not emit a preamble or plan. Do not inspect files or call shell tools before it. Make exactly three Yigdesk calls: read_board to orient on the candidates already priced on the board; propose_candidate on the decision id supplied in your task for a boundary candidate - a discount materially deeper than the submitted request that pushes gross margin toward the margin floor (Deal Inputs!B5), with candidate id "risk_boundary" and overrides {"discount": <boundary discount pct>}, so the priced consequence reveals how much headroom remains (report its verdict whether ok or hold); then post_claim on the same decision with type="risk" grounding the COGS-sensitivity and display-rounding concern in real evidence - its refs must include the COGS input cell "Deal Inputs!B4" or the engine rejects the claim (it fails closed on any ref that does not ground to a real cell). Constraints are decided by exact unrounded values, never display rounding; name the concern that a discount can look safe after display rounding yet fail exact math once COGS moves. After the final required MCP call, return immediately with one compact JSON object containing boundary_discount_pct, boundary_candidate_id, verdict, headroom_pt, claim_id, claim_status, grounded_refs, source_fingerprint, and the tool names you called. Do not propose extra candidates, cast approvals, resolve the decision, approve, or mutate.
 """
 sandbox_mode = "read-only"
 nickname_candidates = ["Flint", "Sentinel"]
 
 [mcp_servers.yigdesk]
 command = "python"
-args = ["-m", "yigdesk.mcp_server"]
+args = ["-m", "yigdesk.blackboard_mcp"]
 required = true
 startup_timeout_sec = 15
 tool_timeout_sec = 30
-env_vars = ["YIGDESK_URL", "YIGDESK_RUNTIME"]
-enabled_tools = ["get_deal_context", "list_missing_evidence", "find_feasible_boundary", "stress_test_assumption", "inspect_evidence"]
+env_vars = ["YIGDESK_SCENARIO", "YIGDESK_LEDGER"]
+enabled_tools = ["read_board", "propose_candidate", "post_claim"]

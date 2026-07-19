@@ -1,24 +1,28 @@
 ---
 name: yigdesk-council
-description: Bind a generated synthetic Northwind FY2024 XLSX to an immutable local Yigdesk session, run the exact four-role Codex decision council, verify its actor-attributed audit, and return a revision-bound discount recommendation. Use when the user asks in natural language to upload or analyze a synthetic workbook, decide whether a discount such as 2% makes sense, find the financially safe percentage, challenge a proposal with subagents, or demo the Yigdesk A2A workflow without switching between Codex, a terminal, and the browser.
+description: Turn one natural-language discount request into a real local blackboard run - bind the synthetic workbook into an immutable scenario, open a decision, spawn the four Codex council roles over the six blackboard ops (read_board, propose_candidate, post_claim), then let the deterministic gate cast approval and resolve, and return the committed DecisionRecord. Use when the user asks to analyze a synthetic workbook, decide whether a discount such as 2% makes sense, find the financially safe percentage, challenge a proposal with subagents, or run the Yigdesk decision-council demo without leaving Codex.
 ---
 
 # Yigdesk Council
 
-Turn one natural-language request into a real local data flow: validate and copy the
-synthetic workbook, bind decision inputs to an immutable revision, coordinate the
-project's specialist Codex agents, verify their exact Yigdesk tool trace, and report
-only supported conclusions. The browser is an optional evidence view, not a required
-control surface.
+Turn one natural-language request into a real local decision flow: bind the
+synthetic workbook into an immutable scenario, open a decision on the deterministic
+blackboard, coordinate the project's specialist Codex agents over the six blackboard
+ops, and let the deterministic gate - not the model - close the decision. The board
+is an append-only ledger, so the ledger itself is the audit and the committed
+DecisionRecord is the outcome. The browser is an optional evidence view, not a
+required control surface.
 
 ## Scope guard
 
 - Accept only a generated synthetic `.xlsx` carrying the required `SYNTHETIC` marker.
-- Keep the workflow read-only. Never approve, send, sign, message, mutate the source,
-  write back to a workbook, or connect a production system.
+- Never write back to the source model: the blackboard prices candidates and records
+  decisions to its own ledger but never mutates the workbook. Never approve outside
+  the gate, send, sign, message, or connect a production system.
 - Do not copy a file outside the ignored Yigdesk runtime except when the user asks.
-- Treat `HOLD`, a bind rejection, revision drift, missing evidence, an incomplete role,
-  or a failed audit as terminal for that revision. Do not release an unverified result.
+- Treat a `pending` gate result, a `hold` candidate, a bind rejection, missing
+  evidence, a rejected (ungrounded) claim, or an incomplete role as terminal for that
+  attempt. Do not release an unverified result.
 - Never invent market evidence. Financial feasibility is not commercial optimality.
 - Keep orchestration in the current Codex Work task. Do not launch a nested
   `codex exec`; use the project custom agents and their inherited Yigdesk MCP client.
@@ -45,8 +49,7 @@ move the file into the repository.
 
 For a follow-up that refers to the current bound request and does not change the
 workbook or decision inputs, reuse the current session without asking for its original
-path. Any new file, discount, or floor requires a new bind and therefore a new session
-and audit.
+path. Any new file, discount, or floor requires a new bind and therefore a new scenario.
 
 ## 2. Bind an immutable session
 
@@ -57,111 +60,112 @@ the repository root run:
 python -m yigdesk.cli bind --file <absolute-xlsx-path> --discount <submitted> --floor <floor> --current-discount <current>
 ```
 
-Require JSON status `BOUND`, `analysis_bytes_unchanged: true`, a session id, revision
-id, source fingerprint, projection fingerprint, and source-cell count. A rejected bind
-must not replace the prior active session. Do not delete or edit anything under
-`runtime/sessions/`.
+Require JSON status `BOUND`, `analysis_bytes_unchanged: true`, a session id, source
+fingerprint, projection fingerprint, and source-cell count. A rejected bind must not
+replace the prior active scenario. Do not delete or edit anything under
+`runtime/sessions/`. The reused importer turns this bound upload into the immutable
+scenario the blackboard prices against.
 
-## 3. Make the read surface available
+## 3. Point the blackboard at the bound scenario
 
-When the real council E2E harness supplies a verified preflight containing the active
-revision id, source fingerprint, packet id, and all three decision inputs, use that
-bounded identity and do not repeat shell or CLI preflight. This exception exists only
-for the repository's read-only performance harness, which already performed health,
-state, analysis, and active-session checks before launching Codex.
+The blackboard MCP server (`python -m yigdesk.blackboard_mcp`) reads two env vars:
+`YIGDESK_SCENARIO`, the path to an immutable scenario directory holding `model.json`
+and its workbook (the default is `data/scenarios/council_discount/`), and
+`YIGDESK_LEDGER`, the append-only board ledger (default `runtime/board.jsonl`). Point
+`YIGDESK_SCENARIO` at the default council scenario, or at the scenario the reused
+importer produced from the bound upload; the role agents inherit both env vars from the
+project MCP config.
 
-Check `http://127.0.0.1:8787/api/health`. If it is unavailable, start
-`python -m yigdesk.app` in a yielded or long-lived background terminal and wait for the
-health endpoint. In a sandboxed Windows task, prefer a yielded long-running command;
-`Start-Process` children may be reaped when their shell exits. Keep control in this
-Codex task; do not tell the user to open another terminal or browser.
-
-Run `python -m yigdesk.cli state`. Require its session id, revision id, and source
-fingerprint to equal the bind receipt or reused active-session identity. Then run
-`python -m yigdesk.cli analyze`.
-If its packet is `HOLD`, return the missing evidence and stop before spawning agents.
+Run `python -m yigdesk.cli state` and require its session id and source fingerprint to
+equal the bind receipt or reused active-session identity before spawning agents. The
+optional read app (`python -m yigdesk.app`, `http://127.0.0.1:8787`) is only an
+evidence view; do not make the user open it to obtain the answer.
 
 ## Council latency contract
 
 For every specialist and optimizer `spawn_agent` call, set `fork_turns="none"`.
 Do not copy the parent conversation into a specialist. Send one compact task containing
-only the actor, exact required tool sequence and arguments, submitted discount,
-margin floor, revision id, source fingerprint, packet id, and the expected output
-fields. The spawned agent's first action must be its first required Yigdesk MCP call;
+only the role identity, the decision id, the exact required op sequence and arguments,
+the submitted discount, the margin floor, the scenario source fingerprint, and the
+expected output fields. The spawned agent's first action must be its first required Yigdesk MCP call;
 it must not browse, inspect the repository, run shell commands, write a plan, or emit a
 preamble first. This keeps the real Codex Work path on standard tier with bounded
 context; it does not enable Fast mode or launch a nested `codex exec`.
 
-## 4. Run the real Codex council
+## 4. Open the decision and run the council over the six ops
 
-For a Northwind decision-council request, spawn `finance_analyst`, `sales_advocate`,
-and `risk_challenger` in parallel. Give each the submitted discount and the bind
-receipt or active-session identity. Require actor attribution on every Yigdesk call and these exact,
-role-specific sequences—no additional Yigdesk calls:
+The council speaks exactly six blackboard ops. The role agents get only read_board,
+propose_candidate, and post_claim; open_decision, cast_approval, and request_resolve
+stay with the orchestrator, so a role agent can never open, approve, or resolve - only
+the deterministic gate closes a decision.
 
-- `finance_analyst`: `get_deal_context`; `find_feasible_boundary(0.01)`;
-  `evaluate_proposal(submitted)`; `inspect_evidence("Deal Model!B4")`.
-- `sales_advocate`: `get_deal_context`; `evaluate_proposal(submitted)`;
-  `evaluate_proposal(one concrete alternative)`.
-- `risk_challenger`: `get_deal_context`; `list_missing_evidence`;
-  `find_feasible_boundary(0.01)`;
-  `stress_test_assumption(submitted, 5)`;
-  `inspect_evidence("Deal Model!B4")`.
+1. As the orchestrator, `open_decision` for the discount question, passing the decision
+   id, the question, decision_type `council_discount`, and the scenario policy
+   (required cfo approval, a required grounded `risk` claim, selector `max:headroom`).
 
-Wait for all three with `wait_agent` using a timeout_ms of at least 10000; shorter
-values are invalid and only add a failed orchestration round trip. Require every
-output to carry the same revision id, source
-fingerprint, and packet id. Reject a role result that omits its proposal, evidence, or
-identity.
+2. Spawn `finance_analyst`, `sales_advocate`, and `risk_challenger` in parallel. Give
+   each the decision id, the submitted discount, the margin floor, and its unique
+   candidate/claim ids. Require these exact op sequences - no extra Yigdesk calls:
+   - `finance_analyst`: `read_board`; `propose_candidate(submitted discount)`.
+   - `sales_advocate`: `read_board`; `propose_candidate(submitted discount)`;
+     `propose_candidate(one concrete alternative)`.
+   - `risk_challenger`: `read_board`; `propose_candidate(boundary candidate)`;
+     `post_claim(type="risk", grounded in "Deal Inputs!B4")`.
+   The engine prices every candidate deterministically and fails a claim closed unless
+   its refs ground to real cells, so no persona can invent a figure. Wait with
+   `wait_agent` using a timeout_ms of at least 10000; shorter values are invalid and
+   only add a failed orchestration round trip. Reject a role result that omits its
+   priced consequence or its grounded claim.
 
-Only after all three pass the revision gate, spawn `decision_optimizer`. Give it the
-three grounded outputs and require exactly:
+3. Only after those three land on the board, spawn `decision_optimizer`. Require
+   exactly: `read_board` (compare the priced candidates by exact headroom), then
+   `post_claim` a non-binding advisory recommendation. The optimizer must not
+   `propose_candidate` and must not `request_resolve` - it advises, it does not close.
 
-1. `get_deal_context` with actor `decision_optimizer`.
-2. `compare_proposals` with exactly the submitted, sales alternative, largest safe step, and first unsafe values from the role outputs. Keep all four unique and do
-   not omit the rejected first-unsafe proposal.
-3. `inspect_evidence("Deal Model!B4")` with actor `decision_optimizer`.
+4. As the orchestrator or human reviewer, `cast_approval` on the chosen candidate
+   (verdict `approve`, scoped to the candidate id) to satisfy the policy's required cfo
+   approval.
 
-If fewer than two unique proposals exist, stop with `HOLD` instead of fabricating one.
-The optimizer may identify a highest financially feasible candidate, but must not call
-it commercially optimal without supplied commercial evidence.
+5. Call `request_resolve`. This runs the deterministic gate: it returns
+   `pending(reason)` when a required approval or grounded risk claim is missing or no
+   candidate passes the constraints, or it commits a `DecisionRecord` naming the chosen
+   candidate, the closing selector, the evidence refs, and the source fingerprint.
 
-## 5. Verify before reporting
+If fewer than two priced candidates exist, stop with the pending reason instead of
+fabricating one. The optimizer may name a highest financially feasible candidate, but
+must not call it commercially optimal without supplied commercial evidence.
 
-For the repository's real council E2E only, the harness verifies the audit after Codex exits.
-The outer task must return the schema-bound `READY_FOR_EXTERNAL_AUDIT` candidate
-immediately after the optimizer; it must not run this command or withhold the candidate
-solely because external verification has not yet executed.
+## 5. The ledger is the audit
 
-For interactive council runs, run:
+There is no separate audit-verification step and no post-hoc verifier to run. The board
+is an append-only ledger: every open_decision, propose_candidate, post_claim,
+cast_approval, and resolve is recorded in order under `YIGDESK_LEDGER` (default
+`runtime/board.jsonl`), so the ledger itself is the audit trail. Grounding is enforced
+by the engine at write time - post_claim fails closed on any ungrounded ref, and the
+gate refuses to resolve without the policy's required grounded risk claim and approval
+- so there is nothing to re-verify after the fact. The committed DecisionRecord returned
+by request_resolve is the outcome; a `pending(reason)` is a terminal HOLD for this
+attempt.
 
-```powershell
-python -m scripts.verify_a2a_audit
-```
+## 6. Return the committed DecisionRecord
 
-This resolves the active session's own audit file. Require `verified: true`, exactly
-15 accepted calls, all four expected roles, and the same revision identity. If the
-command fails or any condition differs, report `AGENT REJECTED` or `HOLD` with the
-specific reason and do not expose a recommendation.
+Lead with the answer and report the committed DecisionRecord:
 
-## 6. Return one decision brief
-
-Lead with the answer and include:
-
-- submitted percentage: pass/fail under exact math;
-- recommended percentage, labeled either `financially feasible` or
-  `commercially supported` as the evidence permits;
-- exact safe boundary, largest safe 0.01-point proposal, first unsafe proposal;
-- base and `+5% COGS` stressed margin outcome;
-- revision id, source fingerprint prefix, inspected address, and audit result;
+- the chosen candidate and its discount, labeled `financially feasible` (selector
+  `max:headroom`) rather than `commercially optimal` unless commercial evidence exists;
+- the submitted discount's priced verdict and its exact headroom against the floor;
+- the boundary candidate's remaining headroom and the grounded `risk` claim that gates
+  the close;
+- the closing selector, evidence refs, and source-fingerprint prefix from the record;
 - `http://127.0.0.1:8787` only as an optional evidence-view link.
 
-Do not make the user visit the browser to obtain the answer. Keep all calculations and
-claims grounded in Yigdesk tool responses rather than recomputing them in prose.
+If `request_resolve` returned `pending`, report the reason and the missing approval or
+grounded claim instead of a recommendation. Keep every figure grounded in the priced
+consequences rather than recomputing them in prose.
 
 ## Natural-language triggers
 
-- “用我上传的合成 Excel 判断 Northwind 的 2% 折扣是否合理，底线 30%。”
-- “让 finance、sales、risk 相互 challenge，再告诉我安全的折扣是多少。”
-- “跑一次真实 Yigdesk A2A demo，全程留在 Codex。”
-- “基于当前绑定版本，把 2% 改成 2.2% 再重新评估。”
+- "用我上传的合成 Excel 判断 Northwind 的 2% 折扣是否合理，底线 30%。"
+- "让 finance、sales、risk 相互 challenge，再告诉我安全的折扣是多少。"
+- "跑一次真实 Yigdesk 决策黑板 demo，全程留在 Codex。"
+- "基于当前绑定版本，把 2% 改成 2.2% 再重新评估。"
