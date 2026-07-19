@@ -21,3 +21,20 @@ def test_lists_six_ops_and_prices_candidate(tmp_path):
     names, board = asyncio.run(_roundtrip(str(tmp_path/"b.jsonl"), str(ROOT/"data/scenarios/discount_approval")))
     assert set(names) == {"open_decision","propose_candidate","post_claim","read_board","cast_approval","request_resolve"}
     assert board["decisions"]["d1"]["candidates"]["c1"]["consequence"]["verdict"] == "ok"
+
+async def _open_typed_and_read(ledger, scenario_dir):
+    params = StdioServerParameters(command=sys.executable, args=["-m","yigdesk.blackboard_mcp"],
+        env={**os.environ, "YIGDESK_LEDGER": ledger, "YIGDESK_SCENARIO": scenario_dir})
+    async with stdio_client(params) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            await s.call_tool("open_decision", {"decision_id":"d1","question":"Approve 12%?",
+                "decision_type":"council_discount","policy":{"candidate_selector":"max:headroom"}})
+            return (await s.call_tool("read_board", {})).structuredContent
+
+def test_read_board_includes_decision_type_and_policy(tmp_path):
+    board = asyncio.run(_open_typed_and_read(str(tmp_path/"b.jsonl"), str(ROOT/"data/scenarios/discount_approval")))
+    for d in board["decisions"].values():
+        assert "decision_type" in d and "policy" in d
+    assert board["decisions"]["d1"]["decision_type"] == "council_discount"
+    assert board["decisions"]["d1"]["policy"]["candidate_selector"] == "max:headroom"

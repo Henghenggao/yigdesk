@@ -400,7 +400,7 @@ def _open_decision_in_process(
     """Open the decision on the run's private ledger before Codex is spawned.
 
     Constructs a Blackboard over the scenario's evaluator/source (mirroring
-    ``blackboard_mcp._bb``) pointed at the isolated run ledger, so Codex only needs to
+    ``board.build_blackboard``) pointed at the isolated run ledger, so Codex only needs to
     call propose_candidate + read_board.
     """
     model = json.loads((scenario_dir / "model.json").read_text(encoding="utf-8"))
