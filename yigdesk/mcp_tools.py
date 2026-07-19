@@ -32,6 +32,7 @@ class YigdeskToolClient:
         workbook = payload["workbook"]
         return {
             "scenario_id": payload["scenario_id"],
+            "session": payload.get("session"),
             "request": payload["scenario"],
             "source": payload.get("source"),
             "workbook": {
@@ -104,6 +105,11 @@ class YigdeskToolClient:
         except HTTPError as error:
             detail = _error_detail(error)
             if error.code == 404:
+                if not path.startswith("/api/inspect"):
+                    raise ToolCallError(
+                        "Yigdesk revision is unknown or inactive. Refresh context only on a "
+                        "new clean council session."
+                    ) from error
                 raise ToolCallError(
                     f"{detail} Choose an address returned by get_deal_context, then retry "
                     "inspect_evidence with that exact address."

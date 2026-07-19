@@ -1,0 +1,4 @@
+interface:
+  display_name: "Yigdesk Decision Council"
+  short_description: "Bind synthetic workbooks and run an audited Codex council"
+  default_prompt: "Use $yigdesk-council to analyze my attached synthetic workbook and return an audited decision."

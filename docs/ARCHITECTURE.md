@@ -10,6 +10,12 @@ parser reads FY2024 quarterly cells from <code>P&amp;L Report</code>, records ev
 source address and the source SHA-256, and builds a five-formula consequence
 projection. It does not contain or call the private Yigrid kernel.
 
+For natural-language Codex intake, `yigdesk.cli bind` validates the file before
+atomically activating a new ignored `runtime/sessions/&lt;id&gt;` directory. The session
+contains an unchanged source copy, derived projection, manifest, and its own council
+audit. Revision identity covers both source evidence and decision inputs, so rebinding
+the same bytes with a different discount or floor cannot reuse an old revision.
+
 ## 2. Read-only server
 
 The Flask API exposes state, object inspection, scenario reset, health, and consequence preview. Reset only regenerates a bundled synthetic fixture. Analysis hashes the XLSX before and after evaluation and reports whether the bytes match.

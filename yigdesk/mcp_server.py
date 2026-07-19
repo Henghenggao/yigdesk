@@ -11,7 +11,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from .mcp_tools import YigdeskToolClient
+from .mcp_tools import ToolCallError, YigdeskToolClient
+from .session import resolve_council_audit_path
 
 
 INSTRUCTIONS = """Yigdesk is a read-only decision blackboard for synthetic workbook evidence.
@@ -73,13 +74,37 @@ def _revision(result: dict[str, Any]) -> dict[str, str]:
 def _audit(event: dict[str, Any], actor: Actor = None) -> None:
     path = os.environ.get("YIGDESK_AUDIT_FILE")
     if not path:
-        return
+        path = str(
+            resolve_council_audit_path(
+                os.environ.get(
+                    "YIGDESK_RUNTIME", Path(__file__).resolve().parents[1] / "runtime"
+                )
+            )
+        )
     if actor in ALLOWED_ACTORS:
         event = {"actor": actor, **event}
     audit_path = Path(path)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     with audit_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def _audit_failure(tool: str, error: Exception, actor: Actor, **fields: Any) -> None:
+    """Persist a stable diagnostic category without leaking exception detail."""
+
+    if isinstance(error, ToolCallError):
+        message = str(error)
+        if "unknown or inactive" in message:
+            error_code = "REVISION_NOT_ACTIVE"
+        elif "unavailable" in message:
+            error_code = "YIGDESK_UNAVAILABLE"
+        else:
+            error_code = "YIGDESK_REJECTED"
+    else:
+        error_code = "INVALID_TOOL_RESPONSE"
+    _audit(
+        {"tool": tool, "ok": False, "error_code": error_code, **fields}, actor
+    )
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -93,8 +118,8 @@ def get_deal_context(actor: Actor = None) -> dict[str, Any]:
 
     try:
         result = _client().get_deal_context()
-    except Exception:
-        _audit({"tool": "get_deal_context", "ok": False}, actor)
+    except Exception as error:
+        _audit_failure("get_deal_context", error, actor)
         raise
     _audit(
         {
@@ -120,8 +145,8 @@ def preview_consequence(actor: Actor = None) -> dict[str, Any]:
 
     try:
         result = _client().preview_consequence()
-    except Exception:
-        _audit({"tool": "preview_consequence", "ok": False}, actor)
+    except Exception as error:
+        _audit_failure("preview_consequence", error, actor)
         raise
     _audit(
         {
@@ -158,8 +183,8 @@ def inspect_evidence(
 
     try:
         result = _client().inspect_evidence(address)
-    except Exception:
-        _audit({"tool": "inspect_evidence", "ok": False, "address": address}, actor)
+    except Exception as error:
+        _audit_failure("inspect_evidence", error, actor, address=address)
         raise
     _audit(
         {
@@ -193,8 +218,8 @@ def evaluate_proposal(
 
     try:
         result = _client().evaluate_proposal(str(requested_discount_pct))
-    except Exception:
-        _audit({"tool": "evaluate_proposal", "ok": False}, actor)
+    except Exception as error:
+        _audit_failure("evaluate_proposal", error, actor)
         raise
     _audit(
         {
@@ -230,14 +255,15 @@ def compare_proposals(
 
     try:
         result = _client().compare_proposals([str(value) for value in discounts_pct])
-    except Exception:
-        _audit({"tool": "compare_proposals", "ok": False}, actor)
+    except Exception as error:
+        _audit_failure("compare_proposals", error, actor)
         raise
     _audit(
         {
             "tool": "compare_proposals",
             "ok": True,
             "proposal_count": len(discounts_pct),
+            "discounts_pct": [str(value) for value in discounts_pct],
             "highest_feasible_proposal_pct": result["comparison"][
                 "highest_feasible_proposal_pct"
             ],
@@ -268,8 +294,8 @@ def find_feasible_boundary(
 
     try:
         result = _client().find_feasible_boundary(str(step_pct))
-    except Exception:
-        _audit({"tool": "find_feasible_boundary", "ok": False}, actor)
+    except Exception as error:
+        _audit_failure("find_feasible_boundary", error, actor)
         raise
     _audit(
         {
@@ -277,6 +303,7 @@ def find_feasible_boundary(
             "ok": True,
             "step_pct": str(step_pct),
             "status": result["boundary"]["status"],
+            "largest_safe_step_pct": result["boundary"]["largest_safe_step_pct"],
             **_revision(result),
         },
         actor,
@@ -310,8 +337,8 @@ def stress_test_assumption(
         result = _client().stress_test_assumption(
             str(requested_discount_pct), str(cogs_change_pct)
         )
-    except Exception:
-        _audit({"tool": "stress_test_assumption", "ok": False}, actor)
+    except Exception as error:
+        _audit_failure("stress_test_assumption", error, actor)
         raise
     _audit(
         {
@@ -337,8 +364,8 @@ def list_missing_evidence(actor: Actor = None) -> dict[str, Any]:
 
     try:
         result = _client().list_missing_evidence()
-    except Exception:
-        _audit({"tool": "list_missing_evidence", "ok": False}, actor)
+    except Exception as error:
+        _audit_failure("list_missing_evidence", error, actor)
         raise
     _audit(
         {

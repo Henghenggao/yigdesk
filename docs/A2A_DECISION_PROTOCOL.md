@@ -39,27 +39,18 @@ revision consistency.
 `.codex/config.toml` also maps every custom-agent name to its TOML file
 explicitly. This prevents a same-named generic task from silently replacing the
 role's developer instructions in non-interactive Codex runs.
-`python -m scripts.verify_a2a_audit runtime/codex-a2a-audit.jsonl` accepts only
+`python -m scripts.verify_a2a_audit` resolves the active immutable session and accepts only
 the exact role sequences on one revision and rejects unknown actors, failed calls,
 or revision drift. Earlier nonconforming attempts remain visible rather than being
 deleted.
 
-Use this prompt in a local Codex task after starting Yigdesk:
+Use the project Skill in a local Codex task; it binds the file, makes the read surface
+healthy, expands the exact role protocol, and verifies the audit:
 
 ```text
-Use the project Yigdesk decision council for the current Northwind request.
-Spawn finance_analyst, sales_advocate, and risk_challenger in parallel. On every
-call pass the matching actor. Finance must make exactly: get_deal_context,
-find_feasible_boundary(0.01), evaluate_proposal(submitted), inspect_evidence
-(Deal Model!B4). Sales must make exactly: get_deal_context,
-evaluate_proposal(submitted), evaluate_proposal(one alternative). Risk must make
-exactly: get_deal_context, list_missing_evidence, find_feasible_boundary(0.01),
-stress_test_assumption(submitted,+5% COGS), inspect_evidence(Deal Model!B4).
-Require matching revision_id, source_fingerprint, and packet_id, then spawn
-decision_optimizer for exactly: get_deal_context, compare_proposals(unique role
-proposals), inspect_evidence(Deal Model!B4). No other Yigdesk calls. Distinguish
-financial feasibility from commercial optimality; do not invent market evidence
-and do not approve, send, or write back.
+Use $yigdesk-council to analyze my attached generated Northwind FY2024 workbook.
+The submitted discount is 2%, current discount is 0%, and gross-margin floor is 30%.
+Run the real challenged council and return only an audit-verified decision.
 ```
 
 For the supplied FY2024 synthetic workbook, the requested 2% discount is

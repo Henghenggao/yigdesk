@@ -6,8 +6,10 @@ from yigdesk.a2a import CouncilAuditError, EXPECTED_TOOL_SEQUENCES, verify_counc
 
 
 def events_for(actor, tools, *, packet="packet-1"):
-    return [
-        {
+    evaluations = 0
+    events = []
+    for tool in tools:
+        event = {
             "actor": actor,
             "tool": tool,
             "ok": True,
@@ -15,8 +17,23 @@ def events_for(actor, tools, *, packet="packet-1"):
             "source_fingerprint": "fingerprint-1",
             "packet_id": packet,
         }
-        for tool in tools
-    ]
+        if tool == "find_feasible_boundary":
+            event["step_pct"] = "0.01"
+            event["largest_safe_step_pct"] = "2.23"
+        elif tool == "evaluate_proposal":
+            evaluations += 1
+            event["requested_discount_pct"] = (
+                "2.1" if actor == "sales_advocate" and evaluations == 2 else "2"
+            )
+        elif tool == "stress_test_assumption":
+            event["requested_discount_pct"] = "2"
+            event["cogs_change_pct"] = "5"
+        elif tool == "inspect_evidence":
+            event["address"] = "Deal Model!B4"
+        elif tool == "compare_proposals":
+            event["discounts_pct"] = ["2", "2.1", "2.23", "2.24"]
+        events.append(event)
+    return events
 
 
 def complete_audit():
@@ -67,3 +84,27 @@ def test_verifier_rejects_revision_drift_or_unattributed_calls():
     ]
     with pytest.raises(CouncilAuditError, match="unattributed"):
         verify_council_audit(unattributed)
+
+
+@pytest.mark.parametrize(
+    ("actor", "tool", "field", "value", "message"),
+    [
+        ("finance_analyst", "find_feasible_boundary", "step_pct", "0.1", "0.01"),
+        ("risk_challenger", "stress_test_assumption", "cogs_change_pct", "4", "5%"),
+        ("risk_challenger", "inspect_evidence", "address", "Deal Model!B3", "B4"),
+        (
+            "decision_optimizer",
+            "compare_proposals",
+            "discounts_pct",
+            ["2", "2.2", "2.23", "2.24"],
+            "sales alternative",
+        ),
+    ],
+)
+def test_verifier_rejects_parameter_drift(actor, tool, field, value, message):
+    events = complete_audit()
+    event = next(item for item in events if item["actor"] == actor and item["tool"] == tool)
+    event[field] = value
+
+    with pytest.raises(CouncilAuditError, match=message):
+        verify_council_audit(events)
