@@ -188,16 +188,30 @@ class CodexRunner:
         proposal: dict[str, Any],
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
-        scenario_dir = Path(scenario_dir)
+        # Resolve to absolute: the in-process pre-open reads scenario_dir against this
+        # cwd, but the same value is exported as YIGDESK_SCENARIO for Codex's MCP
+        # subprocess, which resolves it against its own cwd (codex runs with -C <workspace>).
+        scenario_dir = Path(scenario_dir).resolve()
         with tempfile.TemporaryDirectory(prefix="yigdesk-agent-", dir=self.temp_root) as directory:
             run_dir = Path(directory)
             _prepare_isolated_workspace(run_dir)
             answer_path = run_dir / "answer.json"
             ledger_path = run_dir / "board.jsonl"
-            # Pre-open the decision on the run's private ledger so Codex's required ops
-            # reduce to propose_candidate + read_board. This is also load-bearing:
-            # projection.fold drops a PROPOSE_CANDIDATE whose decision is not already open.
-            _open_decision_in_process(scenario_dir, ledger_path, proposal)
+            try:
+                # Pre-open the decision on the run's private ledger so Codex's required ops
+                # reduce to propose_candidate + read_board. This is also load-bearing:
+                # projection.fold drops a PROPOSE_CANDIDATE whose decision is not already open.
+                _open_decision_in_process(scenario_dir, ledger_path, proposal)
+            except (OSError, json.JSONDecodeError, KeyError) as error:
+                # A missing/unbuilt scenario (no model.json or workbook) must surface as a
+                # typed start failure -- callers (app.py, benchmark._safe_error_summary)
+                # only handle AgentExecutionError/AgentVerificationError.
+                raise AgentExecutionError(
+                    "Scenario is missing or not built "
+                    "(model.json or workbook is unavailable).",
+                    code="AGENT_START_FAILED",
+                    phase="starting_codex",
+                ) from error
             command = self._command(answer_path, scenario_dir, ledger_path, run_dir, proposal)
             environment = _codex_environment(
                 {
@@ -289,6 +303,10 @@ class CodexRunner:
                     phase="verifying_result",
                     elapsed_ms=latency_ms,
                 ) from error
+            # Assisted path: this only checks thread_id + usage. The allowlist /
+            # AGENT_TRACE_TOOL_MISMATCH branch of _verify_trace is intentionally reserved for
+            # Task 5b's bare arm (expected_mcp_tools=()); the assisted trace legitimately holds
+            # multiple ops, so op-presence is enforced separately by the gate just below.
             _verify_trace(trace)
             if not all(tool in tool_calls for tool in REQUIRED_TOOLS):
                 raise AgentVerificationError(

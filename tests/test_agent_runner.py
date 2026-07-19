@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
@@ -148,8 +149,10 @@ def executor_with(answer, *, trace=None, scenario_dir=None):
         assert "YIGDESK_LEDGER" in mcp_env
         assert "PYTHONPATH" in mcp_env
         assert str(cwd) == command[command.index("-C") + 1]
-        # Injected process env carries the scenario (and only allowlisted keys).
-        assert env.get("YIGDESK_SCENARIO") == (str(scenario_dir) if scenario_dir else env.get("YIGDESK_SCENARIO"))
+        # Injected process env carries the scenario (absolute) and only allowlisted keys.
+        assert env.get("YIGDESK_SCENARIO") == (
+            str(Path(scenario_dir).resolve()) if scenario_dir else env.get("YIGDESK_SCENARIO")
+        )
         assert env.get("YIGDESK_LEDGER")
         assert "DATABASE_PASSWORD" not in env
 
@@ -204,7 +207,7 @@ def test_runner_targets_blackboard_mcp_with_scenario_env(tmp_path):
     command = captured["command"]
     assert 'mcp_servers.yigdesk.args=["-m","yigdesk.blackboard_mcp"]' in command
     assert 'mcp_servers.yigdesk.args=["-m","yigdesk.mcp_server"]' not in command
-    assert captured["env"]["YIGDESK_SCENARIO"] == str(scenario)
+    assert captured["env"]["YIGDESK_SCENARIO"] == str(scenario.resolve())
 
     schema_path = command[command.index("--output-schema") + 1]
     schema = json.loads(open(schema_path, encoding="utf-8").read())
@@ -423,6 +426,55 @@ def test_runner_rejects_invalid_answer_json(tmp_path):
         runner.run(scenario, proposal=proposal())
 
     assert caught.value.code == "AGENT_OUTPUT_INVALID"
+
+
+# --- scenario path resolution + typed unbuilt-scenario failure ---------------
+
+
+def test_runner_resolves_relative_scenario_dir_to_absolute_env(tmp_path, monkeypatch):
+    # Codex's MCP subprocess resolves YIGDESK_SCENARIO against its own cwd (-C <workspace>),
+    # so a relative input must be exported as an absolute path.
+    build_scenario(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    captured = {}
+    delegate = executor_with(engine_answer())
+
+    def execute(command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return delegate(command, **kwargs)
+
+    runner = CodexRunner(executor=execute, temp_root=tmp_path)
+    result = runner.run(Path("scenario"), proposal=proposal())
+
+    assert result["verified"] is True
+    injected = captured["env"]["YIGDESK_SCENARIO"]
+    assert Path(injected).is_absolute()
+    assert Path(injected) == Path("scenario").resolve()
+
+
+def test_runner_raises_typed_error_for_missing_scenario(tmp_path):
+    runner = CodexRunner(executor=executor_with(engine_answer()), temp_root=tmp_path)
+
+    with pytest.raises(AgentExecutionError) as caught:
+        runner.run(tmp_path / "does-not-exist", proposal=proposal())
+
+    assert caught.value.code == "AGENT_START_FAILED"
+
+
+def test_runner_raises_typed_error_for_unbuilt_workbook(tmp_path):
+    scenario = tmp_path / "scenario"
+    scenario.mkdir()
+    # model.json present, but the workbook is never built (built on demand elsewhere).
+    (scenario / "model.json").write_text(
+        json.dumps({"workbook": "council_deal.xlsx", "input_refs": {}, "metrics": []}),
+        encoding="utf-8",
+    )
+    runner = CodexRunner(executor=executor_with(engine_answer()), temp_root=tmp_path)
+
+    with pytest.raises(AgentExecutionError) as caught:
+        runner.run(scenario, proposal=proposal())
+
+    assert caught.value.code == "AGENT_START_FAILED"
 
 
 # --- preserved helper guarantees ---------------------------------------------
