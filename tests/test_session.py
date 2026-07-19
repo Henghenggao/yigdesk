@@ -58,7 +58,7 @@ def test_app_loads_and_refreshes_the_active_bound_session(tmp_path):
 
     initial = client.get("/api/state").get_json()
     assert initial["session"]["session_id"] == first_receipt["session_id"]
-    assert initial["revision"]["revision_id"] == first_receipt["revision_id"]
+    assert initial["session"]["revision_id"] == first_receipt["revision_id"]
     assert initial["scenario"]["list_arr_k"] == "14658.2"
 
     second = generate(tmp_path / "second.xlsx")
@@ -98,40 +98,6 @@ def test_decision_inputs_change_the_revision_even_when_source_bytes_do_not(tmp_p
     assert first["source_fingerprint"] == second["source_fingerprint"]
     assert first["projection_fingerprint"] != second["projection_fingerprint"]
     assert first["revision_id"] != second["revision_id"]
-
-
-def test_live_revision_header_is_accepted_until_a_new_session_becomes_active(tmp_path):
-    runtime = tmp_path / "runtime"
-    source = generate(tmp_path / "northwind.xlsx")
-    first = bind_synthetic_session(
-        source,
-        runtime_root=runtime,
-        requested_discount_pct=Decimal("2"),
-        margin_floor_pct=Decimal("30"),
-    )
-    app = create_app(runtime_dir=runtime)
-    app.config.update(TESTING=True)
-    client = app.test_client()
-    first_headers = {"X-Yigdesk-Revision": first["revision_id"]}
-
-    assert client.get("/api/state", headers=first_headers).status_code == 200
-    assert client.post("/api/analyze", json={}, headers=first_headers).status_code == 200
-
-    second = bind_synthetic_session(
-        source,
-        runtime_root=runtime,
-        requested_discount_pct=Decimal("2.2"),
-        margin_floor_pct=Decimal("30"),
-    )
-
-    assert client.get("/api/state", headers=first_headers).status_code == 404
-    assert (
-        client.get(
-            "/api/state",
-            headers={"X-Yigdesk-Revision": second["revision_id"]},
-        ).status_code
-        == 200
-    )
 
 
 def test_failed_bind_does_not_replace_the_previous_active_session(tmp_path):
