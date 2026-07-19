@@ -21,6 +21,9 @@ def resolve(d: Decision, evaluator_revision: str, seq: int = 0):
     """Deterministic close: no LLM, pure function of (candidates, approvals, policy, revision)."""
     if not _approvals_met(d):
         return Pending("required approval missing")
+    for req in d.policy.get("required_claims", []):
+        if not any(c.status == "grounded" and c.type == req["type"] for c in d.claims.values()):
+            return Pending(f"required claim of type {req['type']} missing")
     eligible = _eligible(d)
     if not eligible:
         return Pending("no candidate passes constraints (all HOLD/failed)")

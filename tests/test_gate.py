@@ -37,3 +37,14 @@ def test_human_selected_picks_eligible_candidate():
     from yigdesk.core.model import Approval
     rec = resolve(_decision_hs([Approval("h","cfo","approve","c_ok")]), "rev")
     assert not isinstance(rec, Pending) and rec.chosen_candidate_id == "c_ok" and rec.closed_by == "human"
+
+def test_required_claim_type_blocks_until_present():
+    from yigdesk.core.model import Decision, Candidate, Consequence, Metric, Approval, Claim
+    d = Decision("d1","q","x",{"required_approvals":[{"role":"cfo","verdict":"approve"}],
+                               "candidate_selector":"max:m","required_claims":[{"type":"risk"}]})
+    d.candidates["c1"] = Candidate("c1","a",{}, Consequence("ok",[Metric("m","M","5","5","5","")],[],"f"))
+    d.approvals = [Approval("h","cfo","approve","c1")]
+    r = resolve(d, "rev")
+    assert isinstance(r, Pending) and "claim" in r.reason
+    d.claims["cl1"] = Claim("cl1","risk_agent","risk","c1","cogs may rise",["Deal!B4"],"grounded")
+    assert not isinstance(resolve(d, "rev"), Pending)
