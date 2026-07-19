@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import tempfile
-import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
-from werkzeug.serving import make_server
+from openpyxl import Workbook
 
 from .agent import (
     DEFAULT_MODEL,
@@ -31,7 +32,8 @@ from .agent import (
     _resolve_codex_command,
     _verify_trace,
 )
-from .mcp_tools import YigdeskToolClient
+from .evaluator.expression import ExpressionEvaluator
+from .evaluator.model_source import ModelSource
 
 
 METRIC_FIELDS = ("net_arr", "arr_impact", "gross_margin", "headroom")
@@ -74,6 +76,17 @@ SCORING_CONTRACT = {
     "format_consistency": "literal string equality, reported separately",
 }
 BENCHMARK_SCHEMA = Path(__file__).resolve().parent / "schemas" / "benchmark-result.schema.json"
+BENCHMARK_MODEL_PATH = (
+    Path(__file__).resolve().parents[1] / "data" / "scenarios" / "benchmark" / "model.json"
+)
+# Engine consequence vocabulary (ok/hold) mapped to the independent gold verdict vocabulary.
+VERDICT_MAP = {"ok": "READY FOR CFO", "hold": "HOLD"}
+# The assisted arm opens one decision and prices one candidate: the base case, whose requested
+# discount already lives in the workbook's requested_discount cell, so the candidate needs no
+# overrides. This identity is fixed and carries no private request content.
+ASSISTED_DECISION_ID = "benchmark"
+ASSISTED_CANDIDATE_ID = "requested-terms"
+ASSISTED_QUESTION = "Is the requested deal ready for CFO review under the margin floor?"
 
 
 class BareCodexRunner:
@@ -252,6 +265,76 @@ def _request_projection(case: dict[str, Any]) -> dict[str, str]:
     return {field: request.get(field, _REQUEST_DEFAULTS[field]) for field in REQUEST_FIELDS}
 
 
+# Map each case input field to the benchmark model's workbook cell (Deal Inputs!B2..B6).
+_INPUT_CELLS = {
+    "list_arr_k": "B2",
+    "current_discount_pct": "B3",
+    "requested_discount_pct": "B4",
+    "cogs_k": "B5",
+    "margin_floor_pct": "B6",
+}
+
+
+def _cell_value(raw: Any) -> int | float:
+    """Coerce a case input to a workbook-friendly number that round-trips exactly.
+
+    ModelSource reads cells back through ``Decimal(str(value))``; integers stay integers and
+    fractional values become floats whose ``str`` reproduces the original decimal.
+    """
+
+    value = Decimal(str(raw))
+    if value == value.to_integral_value():
+        return int(value)
+    return float(value)
+
+
+def build_case_scenario(case: dict[str, Any], dest_dir: Path) -> Path:
+    """Materialize a private case as a benchmark scenario (workbook + model.json).
+
+    Writes ``dest_dir/deal.xlsx`` with the case inputs in Deal Inputs!B2..B6 and copies the
+    benchmark ``model.json`` alongside it. The COGS cell (B5) is left blank when ``cogs_k`` is
+    ``None`` so the engine holds on the undefined margin, mirroring the gold's HOLD.
+    """
+
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    inputs = case["inputs"]
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Deal Inputs"
+    for field, cell in _INPUT_CELLS.items():
+        value = inputs[field]
+        if value is None:
+            continue
+        sheet[cell] = _cell_value(value)
+    workbook.save(dest_dir / "deal.xlsx")
+    shutil.copyfile(BENCHMARK_MODEL_PATH, dest_dir / "model.json")
+    return dest_dir
+
+
+def to_gold_vocabulary(answer: dict[str, Any]) -> dict[str, Any]:
+    """Translate an engine-vocabulary answer/consequence into the independent gold vocabulary.
+
+    The engine answer is ``{"verdict": ok|hold, "metrics": {<metric_id>: <value|None>}}`` (the
+    same shape whether it came from the assisted ``run["answer"]`` or a priced consequence). The
+    engine's ``value`` strings carry no unit, so this tags each gold field with its unit and maps
+    the ok/hold verdict. A missing (``None``) gross margin or headroom -- the engine's undefined
+    margin HOLD -- becomes the literal ``Unavailable``, matching how gold encodes that case. The
+    ``current_net_arr`` helper is dropped because it is not a gold field.
+    """
+
+    verdict = VERDICT_MAP.get(answer.get("verdict"), answer.get("verdict"))
+    metrics = answer.get("metrics") or {}
+    gold_metrics: dict[str, str] = {}
+    for field in METRIC_FIELDS:
+        value = metrics.get(field)
+        if field in ("gross_margin", "headroom"):
+            gold_metrics[field] = UNAVAILABLE if value is None else f"{value}%"
+        else:
+            gold_metrics[field] = f"${value}k"
+    return {"verdict": verdict, "metrics": gold_metrics}
+
+
 def score_answer(answer: dict[str, Any], gold: dict[str, Any]) -> dict[str, Any]:
     field_matches = {"verdict": answer.get("verdict") == gold["verdict"]}
     metrics = answer.get("metrics") or {}
@@ -320,15 +403,18 @@ def _normalized_metric(field: str, value: str) -> Decimal:
 def observability_profile(
     run: dict[str, Any],
     *,
-    packet: dict[str, Any] | None = None,
+    proof: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Score the run's audit surface: 2 model-trace signals for bare, plus 3 engine/blackboard
+    signals derived from the priced candidate for the assisted arm (bare=2 / assisted=6)."""
+
     signals = {
         "codex_thread": bool(run.get("thread_id")),
         "model_usage": bool(run.get("model") and run.get("usage")),
         "actual_tool_trace": bool(run.get("tool_calls")),
-        "deterministic_packet": bool(packet and packet.get("packet_id")),
-        "source_fingerprint": bool(packet and packet.get("source_fingerprint")),
-        "byte_immutability_proof": bool(packet and packet.get("analysis_bytes_unchanged") is True),
+        "engine_priced_candidate": bool(proof and proof.get("engine_priced_candidate")),
+        "source_fingerprint": bool(proof and proof.get("source_fingerprint")),
+        "source_bytes_unchanged": bool(proof and proof.get("source_bytes_unchanged") is True),
     }
     return {"score": sum(signals.values()), "total": len(signals), "signals": signals}
 
@@ -344,13 +430,13 @@ def run_comparison(
     if type(runs) is not int or runs < 1:
         raise ValueError("runs must be a positive integer")
     bare_runner = bare_runner or BareCodexRunner()
-    from .agent import CodexRunner
-    from .app import _capture_agent_snapshot, create_app
+    if assisted_runner is None:
+        from .agent import CodexRunner
 
-    assisted_runner = assisted_runner or CodexRunner(
-        model=bare_runner.model,
-        reasoning_effort=bare_runner.reasoning_effort,
-    )
+        assisted_runner = CodexRunner(
+            model=bare_runner.model,
+            reasoning_effort=bare_runner.reasoning_effort,
+        )
     if getattr(bare_runner, "model", None) != getattr(assisted_runner, "model", None):
         raise ValueError("Bare and assisted runners must use the same model.")
     if getattr(bare_runner, "reasoning_effort", None) != getattr(
@@ -358,62 +444,62 @@ def run_comparison(
     ):
         raise ValueError("Bare and assisted runners must use the same reasoning effort.")
 
+    proposal = {
+        "decision_id": ASSISTED_DECISION_ID,
+        "candidate_id": ASSISTED_CANDIDATE_ID,
+        "question": ASSISTED_QUESTION,
+        "overrides": {},
+    }
     records: dict[str, list[dict[str, Any]]] = {"bare": [], "assisted": []}
     with tempfile.TemporaryDirectory(prefix="yigdesk-comparison-") as directory:
-        runtime = Path(directory) / "runtime"
-        app = create_app(
-            runtime_dir=runtime,
-            scenarios={"ready": scenario_from_case(case)},
-            agent_enabled=False,
+        # Build the case once as a benchmark scenario (workbook + model.json); every assisted
+        # trial and the engine baseline price the same source, so the source fingerprint is fixed.
+        scenario_dir = build_case_scenario(case, Path(directory) / "scenario")
+        model = json.loads((scenario_dir / "model.json").read_text(encoding="utf-8"))
+        workbook_path = scenario_dir / model["workbook"]
+        source_fingerprint = _fingerprint(workbook_path)
+        engine_vs_gold = score_answer(
+            to_gold_vocabulary(_price_engine_baseline(scenario_dir, model)),
+            case["gold"],
         )
-        server = make_server("127.0.0.1", 0, app, threaded=True)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        base_url = f"http://127.0.0.1:{server.server_port}"
-        try:
-            state = app.config["YIGDESK_STATE"]
-            with state.lock:
-                snapshot = _capture_agent_snapshot(state)
-            app.config["YIGDESK_AGENT_RUNS"].register_snapshot(snapshot)
-            packet = snapshot.packet()
-            for iteration in range(runs):
-                order = ("bare", "assisted") if iteration % 2 == 0 else ("assisted", "bare")
-                for position, mode in enumerate(order, start=1):
-                    trial_started = time.perf_counter()
-                    try:
-                        if mode == "bare":
-                            result = bare_runner.run(case)
-                            record = _comparison_record(
-                                iteration + 1, position, result, case["gold"]
-                            )
-                        else:
-                            result = assisted_runner.run(
-                                packet,
-                                base_url=base_url,
-                                revision_id=snapshot.revision_id,
-                            )
-                            record = _comparison_record(
-                                iteration + 1,
-                                position,
-                                result,
-                                case["gold"],
-                                packet=packet,
-                            )
-                    except Exception as error:
-                        record = {
-                            "iteration": iteration + 1,
-                            "order_position": position,
-                            "status": "failure",
-                            "performance": {
-                                "latency_ms": round((time.perf_counter() - trial_started) * 1000),
-                                "usage": {},
-                            },
-                            "error": _safe_error_summary(error),
+        for iteration in range(runs):
+            order = ("bare", "assisted") if iteration % 2 == 0 else ("assisted", "bare")
+            for position, mode in enumerate(order, start=1):
+                trial_started = time.perf_counter()
+                try:
+                    if mode == "bare":
+                        result = bare_runner.run(case)
+                        record = _comparison_record(
+                            iteration + 1, position, result, result["answer"], case["gold"]
+                        )
+                    else:
+                        result = assisted_runner.run(scenario_dir, proposal=proposal)
+                        gold_answer = to_gold_vocabulary(result["answer"])
+                        proof = {
+                            "decision_id": proposal["decision_id"],
+                            "candidate_id": proposal["candidate_id"],
+                            "engine_priced_candidate": "propose_candidate"
+                            in (result.get("tool_calls") or []),
+                            "source_fingerprint": source_fingerprint,
+                            "source_bytes_unchanged": _fingerprint(workbook_path)
+                            == source_fingerprint,
+                            "tool_calls": result.get("tool_calls") or [],
                         }
-                    records[mode].append(record)
-        finally:
-            server.shutdown()
-            thread.join(timeout=3)
+                        record = _comparison_record(
+                            iteration + 1, position, result, gold_answer, case["gold"], proof=proof
+                        )
+                except Exception as error:
+                    record = {
+                        "iteration": iteration + 1,
+                        "order_position": position,
+                        "status": "failure",
+                        "performance": {
+                            "latency_ms": round((time.perf_counter() - trial_started) * 1000),
+                            "usage": {},
+                        },
+                        "error": _safe_error_summary(error),
+                    }
+                records[mode].append(record)
 
     report = {
         "protocol": "yigdesk-comparison/v1",
@@ -428,21 +514,12 @@ def run_comparison(
             "recommended_minimum_even_runs": 4,
         },
         "scoring_contract": SCORING_CONTRACT,
-        "engine_vs_gold": score_answer(
-            {
-                "verdict": packet["consequence"]["verdict"],
-                "metrics": {
-                    field: packet["consequence"]["display"][field]
-                    for field in METRIC_FIELDS
-                },
-            },
-            case["gold"],
-        ),
+        "engine_vs_gold": engine_vs_gold,
         "records": records,
         "aggregate": {mode: _aggregate(items) for mode, items in records.items()},
         "privacy": {
             "source_content_included": False,
-            "report_fields": "case id, model, reasoning effort, performance, verdict, metrics, proof hashes, tool names",
+            "report_fields": "case id, model, reasoning effort, performance, verdict, metrics, source fingerprint, tool names",
         },
     }
     output_dir = Path(output_dir)
@@ -452,6 +529,28 @@ def run_comparison(
     )
     (output_dir / "comparison.md").write_text(_markdown_report(report), encoding="utf-8")
     return report
+
+
+def _fingerprint(path: Path) -> str:
+    """SHA-256 of the workbook bytes -- the same fingerprint the engine's ModelSource records."""
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _price_engine_baseline(scenario_dir: Path, model: dict[str, Any]) -> dict[str, Any]:
+    """Price the base case directly through the ExpressionEvaluator (no agent, no packet).
+
+    Returns an engine-vocabulary answer (verdict ok/hold, metrics keyed by engine metric id)
+    ready for ``to_gold_vocabulary``; this is the deterministic reference the report scores
+    against gold independently of either Codex arm.
+    """
+
+    source = ModelSource(scenario_dir / model["workbook"], model["input_refs"])
+    consequence = ExpressionEvaluator(model).price({"overrides": {}}, source)
+    return {
+        "verdict": consequence.verdict,
+        "metrics": {metric.id: metric.value for metric in consequence.metrics},
+    }
 
 
 def _safe_error_summary(error: Exception) -> dict[str, str]:
@@ -468,11 +567,11 @@ def _comparison_record(
     iteration: int,
     order_position: int,
     run: dict[str, Any],
+    gold_answer: dict[str, Any],
     gold: dict[str, Any],
     *,
-    packet: dict[str, Any] | None = None,
+    proof: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    answer = run["answer"]
     record = {
         "iteration": iteration,
         "order_position": order_position,
@@ -482,20 +581,15 @@ def _comparison_record(
             "latency_ms": run.get("latency_ms"),
             "usage": run.get("usage") or {},
         },
-        "accuracy": score_answer(answer, gold),
-        "observability": observability_profile(run, packet=packet),
+        "accuracy": score_answer(gold_answer, gold),
+        "observability": observability_profile(run, proof=proof),
         "result": {
-            "verdict": answer.get("verdict"),
-            "metrics": answer.get("metrics") or {},
+            "verdict": gold_answer.get("verdict"),
+            "metrics": gold_answer.get("metrics") or {},
         },
     }
-    if packet:
-        record["proof"] = {
-            "packet_id": packet["packet_id"],
-            "source_fingerprint": packet["source_fingerprint"],
-            "analysis_bytes_unchanged": packet["analysis_bytes_unchanged"],
-            "tool_calls": run.get("tool_calls") or [],
-        }
+    if proof is not None:
+        record["proof"] = proof
     return record
 
 

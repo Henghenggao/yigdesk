@@ -8,15 +8,19 @@ import pytest
 
 from scripts import compare_agents
 from yigdesk.agent import AgentExecutionError, AgentVerificationError
+from yigdesk.evaluator.expression import ExpressionEvaluator
+from yigdesk.evaluator.model_source import ModelSource
 from yigdesk.benchmark import (
     BareCodexRunner,
     REQUEST_FIELDS,
     _safe_error_summary,
+    build_case_scenario,
     load_case,
     observability_profile,
     run_comparison,
     score_answer,
     scenario_from_case,
+    to_gold_vocabulary,
 )
 
 
@@ -388,15 +392,100 @@ def test_observability_profile_distinguishes_model_trace_from_engine_audit():
             "thread_id": "assisted",
             "model": "gpt-5.6-sol",
             "usage": {"input_tokens": 1},
-            "tool_calls": ["get_deal_context", "preview_consequence", "inspect_evidence"],
+            "tool_calls": ["propose_candidate", "read_board"],
             "verified": True,
         },
-        packet={"packet_id": "cpkt-1", "source_fingerprint": "sha", "analysis_bytes_unchanged": True},
+        proof={
+            "engine_priced_candidate": True,
+            "source_fingerprint": "sha",
+            "source_bytes_unchanged": True,
+        },
     )
 
     assert bare["score"] == 2
     assert assisted["score"] == 6
-    assert assisted["signals"]["deterministic_packet"] is True
+    assert assisted["signals"]["engine_priced_candidate"] is True
+    assert assisted["signals"]["source_bytes_unchanged"] is True
+
+
+def test_gold_vocabulary_maps_missing_cogs_hold_to_unavailable():
+    engine_answer = {
+        "verdict": "hold",
+        "metrics": {
+            "net_arr": "880.00",
+            "current_net_arr": "900.00",
+            "arr_impact": "-20.00",
+            "gross_profit": None,
+            "gross_margin": None,
+            "headroom": None,
+        },
+    }
+
+    gold = to_gold_vocabulary(engine_answer)
+
+    assert gold["verdict"] == "HOLD"
+    assert gold["metrics"]["net_arr"] == "$880.00k"
+    assert gold["metrics"]["arr_impact"] == "$-20.00k"
+    assert gold["metrics"]["gross_margin"] == "Unavailable"
+    assert gold["metrics"]["headroom"] == "Unavailable"
+    assert "current_net_arr" not in gold["metrics"]
+
+    hold_gold = {
+        "verdict": "HOLD",
+        "metrics": {
+            "net_arr": "$880k",
+            "arr_impact": "-$20k",
+            "gross_margin": "Unavailable",
+            "headroom": "Unavailable",
+        },
+    }
+    assert score_answer(gold, hold_gold)["exact_match"] is True
+
+
+def test_build_case_scenario_reproduces_private_gold_through_engine(tmp_path):
+    case = private_case()
+    scenario_dir = tmp_path / "scenario"
+
+    build_case_scenario(case, scenario_dir)
+
+    model = json.loads((scenario_dir / "model.json").read_text(encoding="utf-8"))
+    source = ModelSource(scenario_dir / model["workbook"], model["input_refs"])
+    consequence = ExpressionEvaluator(model).price({"overrides": {}}, source)
+    values = {m.id: m.value for m in consequence.metrics}
+
+    assert consequence.verdict == "ok"
+    assert values["net_arr"] == "880.00"
+    assert values["arr_impact"] == "-20.00"
+
+    gold_answer = to_gold_vocabulary({"verdict": consequence.verdict, "metrics": values})
+
+    assert gold_answer["metrics"]["gross_margin"] == "45.45%"
+    assert gold_answer["metrics"]["headroom"] == "5.45%"
+    score = score_answer(gold_answer, case["gold"])
+    assert score["exact_match"] is True
+    assert score["accuracy"] == 1.0
+
+
+def test_build_case_scenario_leaves_cogs_blank_so_engine_holds(tmp_path):
+    case = private_case()
+    case["inputs"]["cogs_k"] = None
+    scenario_dir = tmp_path / "scenario"
+
+    build_case_scenario(case, scenario_dir)
+
+    model = json.loads((scenario_dir / "model.json").read_text(encoding="utf-8"))
+    source = ModelSource(scenario_dir / model["workbook"], model["input_refs"])
+    consequence = ExpressionEvaluator(model).price({"overrides": {}}, source)
+    values = {m.id: m.value for m in consequence.metrics}
+
+    assert consequence.verdict == "hold"
+    assert values["gross_margin"] is None
+    assert values["headroom"] is None
+
+    gold_answer = to_gold_vocabulary({"verdict": consequence.verdict, "metrics": values})
+    assert gold_answer["verdict"] == "HOLD"
+    assert gold_answer["metrics"]["gross_margin"] == "Unavailable"
+    assert gold_answer["metrics"]["headroom"] == "Unavailable"
 
 
 @pytest.mark.parametrize("runs", [0, -2, 2.5, True])
@@ -473,21 +562,30 @@ def test_comparison_report_omits_private_source_content(tmp_path):
         model = "gpt-5.6-sol"
         reasoning_effort = "low"
 
-        def run(self, packet, *, base_url, revision_id=None):
-            assert revision_id == packet["revision_id"]
-            consequence = packet["consequence"]
+        def run(self, scenario_dir, *, proposal, progress_callback=None):
+            # The assisted arm drives the blackboard: the engine prices the base
+            # candidate and Codex copies the consequence verbatim into engine
+            # vocabulary (verdict ok/hold, metrics keyed by engine metric id).
+            assert (scenario_dir / "model.json").is_file()
+            assert proposal["decision_id"]
+            assert proposal["candidate_id"]
             return {
+                "verified": True,
                 "thread_id": "assisted",
                 "model": self.model,
+                "reasoning_effort": self.reasoning_effort,
                 "latency_ms": 10,
                 "usage": {"input_tokens": 8, "output_tokens": 3},
-                "tool_calls": ["get_deal_context", "preview_consequence", "inspect_evidence"],
-                "verified": True,
+                "tool_calls": ["propose_candidate", "read_board"],
                 "answer": {
-                    "verdict": consequence["verdict"],
+                    "verdict": "ok",
                     "metrics": {
-                        key: consequence["display"][key]
-                        for key in ("net_arr", "arr_impact", "gross_margin", "headroom")
+                        "net_arr": "880.00",
+                        "current_net_arr": "900.00",
+                        "arr_impact": "-20.00",
+                        "gross_profit": "400.00",
+                        "gross_margin": "45.45",
+                        "headroom": "5.45",
                     },
                 },
             }
@@ -504,6 +602,7 @@ def test_comparison_report_omits_private_source_content(tmp_path):
     assert "SECRET-CUSTOMER-CONTENT" not in serialized
     assert report["aggregate"]["bare"]["accuracy_mean"] == 1.0
     assert report["aggregate"]["bare"]["failure_rate"] == 0.0
+    assert report["aggregate"]["assisted"]["accuracy_mean"] == 1.0
     assert report["aggregate"]["assisted"]["observability_score"] == 6
     assert [record["order_position"] for record in report["records"]["bare"]] == [1, 2, 1, 2]
     assert [record["order_position"] for record in report["records"]["assisted"]] == [2, 1, 2, 1]
@@ -544,15 +643,24 @@ def test_comparison_records_one_trial_failure_and_continues(tmp_path):
             }
 
     class Assisted(Bare):
-        def run(self, packet, *, base_url, revision_id=None):
-            assert revision_id == packet["revision_id"]
+        def run(self, scenario_dir, *, proposal, progress_callback=None):
+            assert (scenario_dir / "model.json").is_file()
             return {
+                "verified": True,
                 "thread_id": "assisted-ok",
                 "model": self.model,
                 "latency_ms": 10,
                 "usage": {"input_tokens": 8, "output_tokens": 3},
-                "tool_calls": ["get_deal_context", "preview_consequence", "inspect_evidence"],
-                "answer": {"verdict": case["gold"]["verdict"], "metrics": case["gold"]["metrics"]},
+                "tool_calls": ["propose_candidate", "read_board"],
+                "answer": {
+                    "verdict": "ok",
+                    "metrics": {
+                        "net_arr": "880.00",
+                        "arr_impact": "-20.00",
+                        "gross_margin": "45.45",
+                        "headroom": "5.45",
+                    },
+                },
             }
 
     report = run_comparison(

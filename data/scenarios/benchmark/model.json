@@ -1,0 +1,13 @@
+{
+  "workbook": "deal.xlsx",
+  "input_refs": {"list_arr":"Deal Inputs!B2","current_discount":"Deal Inputs!B3","requested_discount":"Deal Inputs!B4","cogs":"Deal Inputs!B5","floor":"Deal Inputs!B6"},
+  "metrics": [
+    {"id":"net_arr","label":"Net ARR","formula":"list_arr * (1 - requested_discount/100)","unit":"$k"},
+    {"id":"current_net_arr","label":"Current net ARR","formula":"list_arr * (1 - current_discount/100)","unit":"$k"},
+    {"id":"arr_impact","label":"ARR impact","formula":"net_arr - current_net_arr","unit":"$k"},
+    {"id":"gross_profit","label":"Gross profit","formula":"net_arr - cogs","requires":["cogs"],"unit":"$k"},
+    {"id":"gross_margin","label":"Gross margin","formula":"gross_profit / net_arr * 100","requires":["cogs"],"unit":"%"},
+    {"id":"headroom","label":"Headroom","formula":"gross_margin - floor","requires":["cogs"],"unit":"%"}
+  ],
+  "constraints": [{"metric":"headroom","op":">=","value":0}]
+}

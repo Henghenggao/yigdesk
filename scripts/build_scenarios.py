@@ -10,4 +10,5 @@ def _sheet(path, title, rows):
 _sheet(ROOT/"discount_approval/deal.xlsx", "Deal Inputs", {"B2":1000,"B3":10,"B4":480,"B5":40})
 _sheet(ROOT/"saas_margin/margin.xlsx", "Plan", {"B2":2000,"B3":10,"B4":700,"B5":60})
 _sheet(ROOT/"council_discount/council_deal.xlsx", "Deal Inputs", {"B2":1000,"B3":0,"B4":480,"B5":40})
+_sheet(ROOT/"benchmark/deal.xlsx", "Deal Inputs", {"B2":1000,"B3":10,"B4":12,"B5":480,"B6":40})
 print("scenarios built")
