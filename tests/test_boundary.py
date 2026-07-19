@@ -35,9 +35,12 @@ def test_public_sdk_and_components_remain_domain_neutral():
 
 
 def test_public_runtime_has_no_commercial_mutation_or_trust_service():
+    # Approvals + human-gated resolution are the standalone blackboard's core product
+    # (the deterministic gate); this guard now targets SOURCE mutation + external
+    # commercial/trust services only (not the decision-approval ops the blackboard owns).
     forbidden = re.compile(
-        r"approv(?:e|al)|write[-_ ]?back|vault|attest|audit[-_ ]?trail|reopen|sign(?:ing|ature)|"
-        r"multi[-_ ]?tenant|\bsso\b|human[-_ ]?gated",
+        r"write[-_ ]?back|vault|attest|audit[-_ ]?trail|reopen|sign(?:ing|ature)|"
+        r"multi[-_ ]?tenant|\bsso\b",
         re.IGNORECASE,
     )
     hits = {
