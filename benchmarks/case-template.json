@@ -1,0 +1,27 @@
+{
+  "case_id": "replace-with-private-case-id",
+  "request": {
+    "requester": "Synthetic requester",
+    "requester_role": "Account Executive",
+    "recipient": "Synthetic reviewer",
+    "sent_at": "2026-07-18T09:00:00Z",
+    "subject": "Synthetic renewal terms review",
+    "message": "Please assess the requested terms."
+  },
+  "inputs": {
+    "list_arr_k": "1000",
+    "current_discount_pct": "10",
+    "requested_discount_pct": "12",
+    "cogs_k": "480",
+    "margin_floor_pct": "40"
+  },
+  "gold": {
+    "verdict": "READY FOR CFO",
+    "metrics": {
+      "net_arr": "$880k",
+      "arr_impact": "-$20k",
+      "gross_margin": "45.5%",
+      "headroom": "5.5%"
+    }
+  }
+}

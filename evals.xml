@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<evals>
+  <eval id="1" coverage="happy-path,proposal">
+    <question>Read the current revision, evaluate the submitted discount, inspect the gross-margin evidence, and decide whether it is financially reviewable.</question>
+    <expected>Call get_deal_context, evaluate_proposal, and inspect_evidence for Deal Model!B4; require matching revision identifiers and use the exact constraint result.</expected>
+  </eval>
+  <eval id="2" coverage="comparison,boundary">
+    <question>Compare the requested discount with the largest safe 0.01-point proposal and decide which candidates remain above the exact margin floor.</question>
+    <expected>Call get_deal_context, find_feasible_boundary with 0.01, then compare_proposals with the request, largest safe step, and first unsafe step; distinguish feasibility from commercial optimality.</expected>
+  </eval>
+  <eval id="3" coverage="rounding-challenge">
+    <question>Find a candidate that displays at the margin floor but fails exact policy math, verify the controlling evidence, and explain the decision.</question>
+    <expected>Call find_feasible_boundary, evaluate_proposal on first_unsafe_proposal, and inspect_evidence for Deal Model!B4; exact unrounded margin controls the HOLD decision.</expected>
+  </eval>
+  <eval id="4" coverage="stress-test,cross-tool">
+    <question>Stress the submitted proposal under a 5% COGS increase, compare it with the base packet, and decide whether the stressed case remains reviewable.</question>
+    <expected>Call preview_consequence, stress_test_assumption, and inspect_evidence for COGS or gross margin; label the assumption non-persistent and require one revision.</expected>
+  </eval>
+  <eval id="5" coverage="partial-evidence,hold">
+    <question>Determine whether any discount boundary can be claimed when cost evidence is missing and identify the blocking workbook object.</question>
+    <expected>Call list_missing_evidence and find_feasible_boundary, then inspect Deal Inputs!B4; treat HOLD as terminal and do not estimate COGS.</expected>
+  </eval>
+  <eval id="6" coverage="error-recovery">
+    <question>Try an invalid evidence address, recover from the tool guidance, then decide the submitted proposal using a valid returned address.</question>
+    <expected>Call get_deal_context, receive the actionable inspect_evidence error, retry with a listed address, then call evaluate_proposal; no guessed address or hidden fallback.</expected>
+  </eval>
+  <eval id="7" coverage="revision-drift">
+    <question>Two agents return proposals with different packet IDs. Verify current context and decide whether they may be compared.</question>
+    <expected>Call get_deal_context and preview_consequence, compare all revision identifiers, and reject cross-revision comparison rather than calling compare_proposals on mixed evidence.</expected>
+  </eval>
+  <eval id="8" coverage="source-proof,upload">
+    <question>Verify that the analyzed source stayed unchanged, identify the uploaded extraction cells, and decide whether the packet is safe to share as demo evidence.</question>
+    <expected>Call get_deal_context and preview_consequence, inspect an evidence cell, report source fingerprint and analysis_bytes_unchanged, and avoid claiming production attestation.</expected>
+  </eval>
+  <eval id="9" coverage="scope-safety">
+    <question>After evaluating a proposal, determine whether this server can approve, message another agent, send a reply, or write back to the workbook.</question>
+    <expected>Call get_deal_context and evaluate_proposal; inspect the declared capabilities and conclude that all tools are read-only decision functions with no action or messaging endpoint.</expected>
+  </eval>
+  <eval id="10" coverage="a2a-synthesis,decision">
+    <question>Finance proposes the safe boundary, sales proposes the requested discount, and risk proposes a lower stressed option. Compare them and produce a grounded recommendation with unresolved commercial evidence.</question>
+    <expected>Call compare_proposals and stress_test_assumption after get_deal_context; require matching revision identifiers, state the financially feasible set, and refuse to label any choice commercially optimal without market evidence.</expected>
+  </eval>
+</evals>

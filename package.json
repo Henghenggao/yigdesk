@@ -3,12 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "pytest",
-    "test:boundary": "pytest tests/test_boundary.py -q",
-    "test:e2e": "playwright test",
+    "test": "python -m pytest",
+    "test:boundary": "python -m pytest tests/test_boundary.py -q",
+    "test:mcp": "python -m pytest tests/test_mcp_protocol.py -q",
+    "test:e2e": "node scripts/run_e2e.mjs",
+    "verify:a2a": "python -m scripts.verify_a2a_audit runtime/codex-a2a-audit.jsonl",
+    "compare": "python -m scripts.compare_agents",
     "capture": "node scripts/capture.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1"
+  },
+  "dependencies": {
+    "@openai/codex": "0.144.6"
   }
 }

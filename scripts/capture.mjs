@@ -21,6 +21,20 @@ async function capture(viewport, path, scenario = 'ready', verdict = 'READY FOR 
   await page.close();
 }
 
+async function captureUpload() {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1350 }, deviceScaleFactor: 1 });
+  await page.goto(baseURL);
+  await page.locator('#workbook-upload').setInputFiles('runtime/northwind-fy2024-synthetic.xlsx');
+  await page.locator('#upload-action').click();
+  await page.locator('#upload-status[data-state="ready"]').waitFor();
+  await page.getByTestId('analyze').click();
+  await page.locator('#a2a-state').filter({ hasText: 'A2A READY' }).waitFor();
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: 'docs/images/yigdesk-upload-a2a.png', fullPage: true });
+  await page.close();
+}
+
+await captureUpload();
 await capture({ width: 1440, height: 1120 }, 'docs/images/yigdesk-ready.png');
 await capture({ width: 390, height: 844 }, 'docs/images/yigdesk-mobile.png');
 await capture({ width: 1440, height: 1120 }, 'docs/images/yigdesk-hold.png', 'hold', 'HOLD');

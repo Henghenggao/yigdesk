@@ -1,0 +1,77 @@
+# Codex A2A decision protocol
+
+Yigdesk is the shared, deterministic blackboard between Codex subagents. It is
+not an agent-to-agent chat bus. Agents may disagree in prose, but their numbers
+must resolve through the same read-only tools and the same immutable revision.
+
+## Tool surface
+
+The MCP server exposes eight tools—small enough for reliable selection, broad
+enough for a real challenge workflow:
+
+| Tool | Decision job |
+| --- | --- |
+| `get_deal_context` | Establish source, request, evidence addresses, and revision identity. |
+| `preview_consequence` | Return the authoritative consequence for the submitted request. |
+| `inspect_evidence` | Verify one canonical workbook object and its lineage. |
+| `evaluate_proposal` | Test one concrete discount using exact, unrounded constraint math. |
+| `compare_proposals` | Score two to twelve proposals on one revision without inventing a commercial winner. |
+| `find_feasible_boundary` | Find the exact margin boundary, largest safe increment, and first unsafe increment. |
+| `stress_test_assumption` | Re-evaluate a proposal under an explicit, non-persistent COGS assumption. |
+| `list_missing_evidence` | Explain which missing facts make HOLD terminal. |
+
+The tradeoff is deliberate: Yigdesk has no proposal database, messaging,
+approval, send, signing, or write-back tool. Subagents coordinate through Codex;
+Yigdesk only supplies reproducible decision facts. This keeps the public demo
+read-only and prevents a persuasive agent from overriding exact policy math.
+
+## Project-scoped agents
+
+The repository includes four current Codex custom agents under
+`.codex/agents/`: `finance_analyst`, `sales_advocate`, `risk_challenger`, and
+`decision_optimizer`. They inherit the parent session's model, reasoning level,
+tools, and read-only Yigdesk MCP configuration. Each role passes an allowlisted
+`actor` declaration on every tool call. Because Codex subagents inherit the
+parent MCP client, this label is audit attribution rather than authentication;
+the Codex subagent trace establishes which thread acted, while the independent
+Yigdesk audit establishes the declared role, tool sequence, success, and
+revision consistency.
+`.codex/config.toml` also maps every custom-agent name to its TOML file
+explicitly. This prevents a same-named generic task from silently replacing the
+role's developer instructions in non-interactive Codex runs.
+`python -m scripts.verify_a2a_audit runtime/codex-a2a-audit.jsonl` accepts only
+the exact role sequences on one revision and rejects unknown actors, failed calls,
+or revision drift. Earlier nonconforming attempts remain visible rather than being
+deleted.
+
+Use this prompt in a local Codex task after starting Yigdesk:
+
+```text
+Use the project Yigdesk decision council for the current Northwind request.
+Spawn finance_analyst, sales_advocate, and risk_challenger in parallel. On every
+call pass the matching actor. Finance must make exactly: get_deal_context,
+find_feasible_boundary(0.01), evaluate_proposal(submitted), inspect_evidence
+(Deal Model!B4). Sales must make exactly: get_deal_context,
+evaluate_proposal(submitted), evaluate_proposal(one alternative). Risk must make
+exactly: get_deal_context, list_missing_evidence, find_feasible_boundary(0.01),
+stress_test_assumption(submitted,+5% COGS), inspect_evidence(Deal Model!B4).
+Require matching revision_id, source_fingerprint, and packet_id, then spawn
+decision_optimizer for exactly: get_deal_context, compare_proposals(unique role
+proposals), inspect_evidence(Deal Model!B4). No other Yigdesk calls. Distinguish
+financial feasibility from commercial optimality; do not invent market evidence
+and do not approve, send, or write back.
+```
+
+For the supplied FY2024 synthetic workbook, the requested 2% discount is
+financially feasible at the configured 30% floor. The exact maximum is
+2.239020%; at 0.01-point increments, 2.23% is the largest safe value. A 2.24%
+proposal displays 30.0% gross margin but fails the exact constraint. That
+rounding disagreement is intentional adversarial evidence for the risk agent.
+It does not prove that 2.23% is commercially optimal; market and customer
+evidence would be required for that claim.
+
+## Evaluation set
+
+`evals.xml` contains ten multi-tool decision questions spanning happy path,
+partial evidence, invalid-address recovery, cross-revision rejection, rounding,
+stress testing, source immutability, scope safety, and A2A synthesis.

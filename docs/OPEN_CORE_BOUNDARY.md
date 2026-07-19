@@ -8,6 +8,9 @@ Yigdesk is the public adoption slice. Yigrid is the private production product.
 - two read-only web components;
 - Yigdesk UI and synthetic finance fixture;
 - fixed five-formula preview adapter;
+- strict generated-synthetic XLSX parser and ephemeral upload revision;
+- deterministic proposal evaluation, comparison, boundary, and stress functions;
+- project-scoped Codex subagent configuration;
 - demo consequence-packet shape;
 - tests and deployment scaffolding.
 
