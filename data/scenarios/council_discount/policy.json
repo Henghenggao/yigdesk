@@ -1,0 +1,1 @@
+{"decision_type":"council_discount","required_approvals":[{"role":"cfo","verdict":"approve"}],"required_claims":[{"type":"risk"}],"candidate_selector":"max:headroom"}
