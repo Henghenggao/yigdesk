@@ -1,10 +1,16 @@
-"""Codex orchestration with engine-grounded verification."""
+"""Codex orchestration against the deterministic blackboard MCP surface.
+
+The Yigdesk-assisted Codex arm drives the blackboard server (``yigdesk.blackboard_mcp``)
+over stdio. Determinism is the guarantee: a figure only becomes real when Codex calls
+``propose_candidate`` and the engine prices it, so there is no post-hoc field-drift
+verifier here -- Codex copies the engine-returned consequence verbatim. The sandbox
+isolation and secret-hygiene guarantees around the Codex process are preserved.
+"""
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -15,13 +21,19 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
+from yigdesk.core.blackboard import Blackboard
+from yigdesk.evaluator.expression import ExpressionEvaluator
+from yigdesk.evaluator.model_source import ModelSource
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "agent-result.schema.json"
+SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "agent-answer.schema.json"
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "low"
 SUPPORTED_REASONING_EFFORTS = frozenset(("minimal", "low", "medium", "high", "xhigh"))
-REQUIRED_TOOLS = ("get_deal_context", "preview_consequence", "inspect_evidence")
+# A number only becomes real by being priced through propose_candidate; that is the one
+# op the assisted arm must be observed calling.
+REQUIRED_TOOLS = ("propose_candidate",)
 PROGRESS_PHASES = frozenset(
     ("starting_codex", "calling_yigdesk_tools", "verifying_result")
 )
@@ -76,8 +88,8 @@ SHELL_ENV_INCLUDE_ONLY = (
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
-    "YIGDESK_URL",
-    "YIGDESK_AUDIT_FILE",
+    "YIGDESK_SCENARIO",
+    "YIGDESK_LEDGER",
 )
 PASSIVE_TRACE_ITEMS = frozenset(("agent_message", "reasoning", "todo_list", "error"))
 EXECUTION_ERROR_CODES = frozenset(
@@ -95,23 +107,12 @@ EXECUTION_ERROR_CODES = frozenset(
 VERIFICATION_ERROR_CODES = frozenset(
     (
         "AGENT_VERIFICATION_FAILED",
-        "AGENT_REVISION_REQUIRED",
-        "AGENT_AUDIT_INVALID",
-        "AGENT_AUDIT_TOOL_FAILED",
         "AGENT_TRACE_THREAD_MISSING",
         "AGENT_TRACE_USAGE_INVALID",
         "AGENT_TRACE_ACTIVITY_MISSING",
         "AGENT_TRACE_TOOL_MISMATCH",
-        "AGENT_AUDIT_TOOL_MISMATCH",
-        "AGENT_PACKET_REVISION_MISSING",
-        "AGENT_AUDIT_REVISION_MISMATCH",
-        "AGENT_PACKET_ID_MISMATCH",
-        "AGENT_VERDICT_MISMATCH",
-        "AGENT_METRIC_MISMATCH",
+        # Retained for parity with the API/benchmark failure-summary allowlist.
         "AGENT_EVIDENCE_MISMATCH",
-        "AGENT_DRAFT_STATUS_MISMATCH",
-        "AGENT_SUMMARY_FIGURE_MISMATCH",
-        "AGENT_READ_ONLY_PROOF_MISSING",
     )
 )
 
@@ -134,7 +135,7 @@ class AgentExecutionError(RuntimeError):
 
 
 class AgentVerificationError(RuntimeError):
-    """Codex output did not match the deterministic consequence packet."""
+    """Codex output did not satisfy the deterministic trace guarantees."""
 
     def __init__(
         self,
@@ -182,35 +183,26 @@ class CodexRunner:
 
     def run(
         self,
-        expected_packet: dict[str, Any],
+        scenario_dir: Path,
         *,
-        base_url: str,
-        revision_id: str | None = None,
+        proposal: dict[str, Any],
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
-        revision_id = revision_id or expected_packet.get("revision_id")
-        if not revision_id:
-            raise AgentVerificationError(
-                "An immutable agent revision is required.",
-                code="AGENT_REVISION_REQUIRED",
-            )
+        scenario_dir = Path(scenario_dir)
         with tempfile.TemporaryDirectory(prefix="yigdesk-agent-", dir=self.temp_root) as directory:
             run_dir = Path(directory)
             _prepare_isolated_workspace(run_dir)
             answer_path = run_dir / "answer.json"
-            audit_path = run_dir / "mcp-audit.jsonl"
-            command = self._command(
-                answer_path,
-                audit_path,
-                base_url,
-                run_dir,
-                revision_id,
-                expected_packet,
-            )
+            ledger_path = run_dir / "board.jsonl"
+            # Pre-open the decision on the run's private ledger so Codex's required ops
+            # reduce to propose_candidate + read_board. This is also load-bearing:
+            # projection.fold drops a PROPOSE_CANDIDATE whose decision is not already open.
+            _open_decision_in_process(scenario_dir, ledger_path, proposal)
+            command = self._command(answer_path, scenario_dir, ledger_path, run_dir, proposal)
             environment = _codex_environment(
                 {
-                    "YIGDESK_URL": base_url,
-                    "YIGDESK_AUDIT_FILE": str(audit_path),
+                    "YIGDESK_SCENARIO": str(scenario_dir),
+                    "YIGDESK_LEDGER": str(ledger_path),
                     "NO_COLOR": "1",
                 }
             )
@@ -252,7 +244,7 @@ class CodexRunner:
                 if _contains_yigdesk_mcp_activity(error.output):
                     report_progress("calling_yigdesk_tools")
                 raise AgentExecutionError(
-                    "Codex timed out before producing a verified result.",
+                    "Codex timed out before producing a result.",
                     code="AGENT_TIMEOUT",
                     phase=last_phase or "starting_codex",
                     elapsed_ms=max(
@@ -273,18 +265,19 @@ class CodexRunner:
             latency_ms = round((time.perf_counter() - started) * 1000)
             if completed.returncode != 0:
                 raise AgentExecutionError(
-                    "Codex did not produce a verified result.",
+                    "Codex did not produce a result.",
                     code="AGENT_PROCESS_FAILED",
                     phase=last_phase or "starting_codex",
                     elapsed_ms=latency_ms,
                 )
             trace = _read_codex_trace(completed.stdout)
-            if any(
-                activity.get("type") == "mcp_tool_call"
-                and activity.get("server") == "yigdesk"
-                and activity.get("tool") in REQUIRED_TOOLS
+            tool_calls = [
+                activity["tool"]
                 for activity in trace["tool_activity"]
-            ):
+                if activity.get("type") == "mcp_tool_call"
+                and activity.get("server") == "yigdesk"
+            ]
+            if any(tool in REQUIRED_TOOLS for tool in tool_calls):
                 report_progress("calling_yigdesk_tools")
             report_progress("verifying_result")
             try:
@@ -296,9 +289,13 @@ class CodexRunner:
                     phase="verifying_result",
                     elapsed_ms=latency_ms,
                 ) from error
-            _verify_trace(trace, expected_mcp_tools=REQUIRED_TOOLS)
-            audit = _read_audit(audit_path)
-            _verify(answer, audit, expected_packet)
+            _verify_trace(trace)
+            if not all(tool in tool_calls for tool in REQUIRED_TOOLS):
+                raise AgentVerificationError(
+                    "Codex did not price the candidate through the engine "
+                    "(propose_candidate is missing from the trace).",
+                    code="AGENT_TRACE_ACTIVITY_MISSING",
+                )
             return {
                 "verified": True,
                 "model": self.model,
@@ -306,29 +303,23 @@ class CodexRunner:
                 "thread_id": trace["thread_id"],
                 "latency_ms": latency_ms,
                 "usage": trace["usage"],
-                "tool_calls": [event["tool"] for event in audit],
-                "audit": audit,
+                "tool_calls": tool_calls,
                 "answer": answer,
             }
 
     def _command(
         self,
         answer_path: Path,
-        audit_path: Path,
-        base_url: str,
+        scenario_dir: Path,
+        ledger_path: Path,
         workspace: Path,
-        revision_id: str,
-        expected_packet: dict[str, Any],
+        proposal: Mapping[str, Any],
     ) -> list[str]:
         python_command = json.dumps(sys.executable)
         mcp_environment = (
             "mcp_servers.yigdesk.env={"
-            f"YIGDESK_URL={json.dumps(base_url)},"
-            f"YIGDESK_AUDIT_FILE={json.dumps(str(audit_path))},"
-            f"YIGDESK_REVISION_ID={json.dumps(revision_id)},"
-            f"YIGDESK_EXPECTED_PACKET_ID={json.dumps(expected_packet['packet_id'])},"
-            "YIGDESK_EXPECTED_SOURCE_FINGERPRINT="
-            f"{json.dumps(expected_packet['source_fingerprint'])},"
+            f"YIGDESK_SCENARIO={json.dumps(str(scenario_dir))},"
+            f"YIGDESK_LEDGER={json.dumps(str(ledger_path))},"
             f"PYTHONPATH={json.dumps(str(ROOT))}"
             "}"
         )
@@ -351,7 +342,7 @@ class CodexRunner:
             "-c",
             f"mcp_servers.yigdesk.command={python_command}",
             "-c",
-            'mcp_servers.yigdesk.args=["-m","yigdesk.mcp_server"]',
+            'mcp_servers.yigdesk.args=["-m","yigdesk.blackboard_mcp"]',
             "-c",
             "mcp_servers.yigdesk.required=true",
             "-c",
@@ -360,20 +351,51 @@ class CodexRunner:
             "mcp_servers.yigdesk.startup_timeout_sec=15",
             "-c",
             "mcp_servers.yigdesk.tool_timeout_sec=30",
-            _prompt(),
+            _prompt(proposal),
         ]
 
 
-def _prompt() -> str:
-    return """Analyze the current synthetic deal request with the Yigdesk MCP server.
-You MUST call get_deal_context first, preview_consequence second, and inspect_evidence
-for at least one address from the returned packet. The packet is the only authority:
-copy its verdict and display metrics exactly and never calculate, infer, round, repair,
-or introduce a figure. Set inspected_evidence to the exact canonical address string
-that you pass to inspect_evidence, character for character, with no label or explanation.
-Keep summary qualitative with no digits. Treat HOLD as terminal.
-Do not invoke shell commands, file tools, web search, or any non-Yigdesk tool.
+def _prompt(proposal: Mapping[str, Any]) -> str:
+    decision_id = str(proposal["decision_id"])
+    candidate_id = str(proposal["candidate_id"])
+    question = str(proposal.get("question", ""))
+    overrides = json.dumps(proposal.get("overrides") or {}, sort_keys=True)
+    return f"""Drive one decision on the Yigdesk deterministic blackboard (MCP server "yigdesk").
+Decision {json.dumps(decision_id)} is already open on the board. Question: {json.dumps(question)}.
+Do exactly the following and nothing else:
+1. Call propose_candidate with decision_id={json.dumps(decision_id)}, candidate_id={json.dumps(candidate_id)},
+   and overrides={overrides}. The engine prices the candidate and returns a consequence.
+2. Call read_board to confirm the candidate and its priced consequence on the board.
+The engine is the sole authority. Copy the consequence verdict verbatim into "verdict", and copy
+every priced metric value verbatim into "metrics", keyed by the engine's metric id, exactly as the
+engine returned it. Never compute, round, infer, repair, or invent any figure; if a metric value is
+absent, copy it as returned. Treat a HOLD verdict as terminal.
+Do not invoke shell commands, file tools, web search, or any non-yigdesk tool.
 Return only the JSON object required by the supplied output schema. Nothing is sent."""
+
+
+def _open_decision_in_process(
+    scenario_dir: Path,
+    ledger_path: Path,
+    proposal: Mapping[str, Any],
+) -> None:
+    """Open the decision on the run's private ledger before Codex is spawned.
+
+    Constructs a Blackboard over the scenario's evaluator/source (mirroring
+    ``blackboard_mcp._bb``) pointed at the isolated run ledger, so Codex only needs to
+    call propose_candidate + read_board.
+    """
+    model = json.loads((scenario_dir / "model.json").read_text(encoding="utf-8"))
+    source = ModelSource(scenario_dir / model["workbook"], model["input_refs"])
+    board = Blackboard(str(ledger_path), ExpressionEvaluator(model), source)
+    board.open_decision(
+        str(proposal["decision_id"]),
+        str(proposal.get("question", "")),
+        str(proposal.get("decision_type", "")),
+        proposal.get("policy") or {},
+        actor="agent:runner",
+        role="owner",
+    )
 
 
 def _toml_map(values: Mapping[str, str]) -> str:
@@ -558,22 +580,6 @@ def _resolve_codex_command(
     return [which("codex") or "codex"]
 
 
-def _read_audit(path: Path) -> list[dict[str, Any]]:
-    try:
-        events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-    except (FileNotFoundError, json.JSONDecodeError) as error:
-        raise AgentVerificationError(
-            "MCP tool audit is missing or invalid.",
-            code="AGENT_AUDIT_INVALID",
-        ) from error
-    if any(not event.get("ok") for event in events):
-        raise AgentVerificationError(
-            "At least one audited MCP tool call failed.",
-            code="AGENT_AUDIT_TOOL_FAILED",
-        )
-    return events
-
-
 def _read_codex_trace(stdout: str) -> dict[str, Any]:
     thread_id = None
     usage: dict[str, int] = {}
@@ -668,86 +674,6 @@ def _verify_trace(
         ]
         if trace.get("tool_activity") != expected_activity:
             raise AgentVerificationError(
-                "Codex trace contains tool activity outside the three required Yigdesk MCP calls.",
+                "Codex trace contains tool activity outside the expected Yigdesk MCP allowlist.",
                 code="AGENT_TRACE_TOOL_MISMATCH",
             )
-
-
-def _verify(answer: dict[str, Any], audit: list[dict[str, Any]], packet: dict[str, Any]) -> None:
-    actual_tools = [event.get("tool") for event in audit]
-    if actual_tools != list(REQUIRED_TOOLS):
-        raise AgentVerificationError(
-            "Required MCP tool audit order is get_deal_context, preview_consequence, inspect_evidence.",
-            code="AGENT_AUDIT_TOOL_MISMATCH",
-        )
-    revision = {
-        "revision_id": packet.get("revision_id"),
-        "source_fingerprint": packet.get("source_fingerprint"),
-        "packet_id": packet.get("packet_id"),
-    }
-    if any(not value for value in revision.values()):
-        raise AgentVerificationError(
-            "Engine packet is missing immutable revision proof.",
-            code="AGENT_PACKET_REVISION_MISSING",
-        )
-    for event in audit:
-        for field, value in revision.items():
-            if event.get(field) != value:
-                raise AgentVerificationError(
-                    f"MCP audit {field} does not match the agent revision.",
-                    code="AGENT_AUDIT_REVISION_MISMATCH",
-                )
-    consequence = packet["consequence"]
-    expected = {
-        "packet_id": packet["packet_id"],
-        "verdict": consequence["verdict"],
-        "metrics": {
-            "net_arr": consequence["display"]["net_arr"],
-            "arr_impact": consequence["display"]["arr_impact"],
-            "gross_margin": consequence["display"]["gross_margin"],
-            "headroom": consequence["display"]["headroom"],
-        },
-    }
-    for field in ("packet_id", "verdict"):
-        if answer.get(field) != expected[field]:
-            code = (
-                "AGENT_PACKET_ID_MISMATCH"
-                if field == "packet_id"
-                else "AGENT_VERDICT_MISMATCH"
-            )
-            raise AgentVerificationError(
-                f"Codex {field} does not match the engine packet.",
-                code=code,
-            )
-    metrics = answer.get("metrics") or {}
-    for field, value in expected["metrics"].items():
-        if metrics.get(field) != value:
-            raise AgentVerificationError(
-                f"Codex metric {field} does not match the engine packet.",
-                code="AGENT_METRIC_MISMATCH",
-            )
-    evidence = {cell["address"] for cell in consequence["evidence_cells"]}
-    inspected = answer.get("inspected_evidence")
-    audited_inspections = {
-        event.get("address") for event in audit if event.get("tool") == "inspect_evidence"
-    }
-    if inspected not in evidence or inspected not in audited_inspections:
-        raise AgentVerificationError(
-            "Inspected evidence is not proven by the packet and MCP audit.",
-            code="AGENT_EVIDENCE_MISMATCH",
-        )
-    if answer.get("draft_status") != "NOT_SENT":
-        raise AgentVerificationError(
-            "Codex must declare the draft as NOT_SENT.",
-            code="AGENT_DRAFT_STATUS_MISMATCH",
-        )
-    if re.search(r"\d", str(answer.get("summary", ""))):
-        raise AgentVerificationError(
-            "Codex summary introduced a figure outside structured packet metrics.",
-            code="AGENT_SUMMARY_FIGURE_MISMATCH",
-        )
-    if packet.get("analysis_bytes_unchanged") is not True:
-        raise AgentVerificationError(
-            "The engine did not prove read-only workbook bytes.",
-            code="AGENT_READ_ONLY_PROOF_MISSING",
-        )

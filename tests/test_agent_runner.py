@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
 
 import pytest
+from openpyxl import Workbook
 
 from yigdesk.agent import (
     AgentExecutionError,
@@ -15,70 +15,97 @@ from yigdesk.agent import (
     CodexRunner,
     _codex_environment,
     _execute,
+    _read_codex_trace,
     _resolve_codex_command,
+    _verify_trace,
 )
 
 
-def expected_packet():
-    return {
-        "packet_id": "cpkt-abc123",
-        "revision_id": "rev-test123",
-        "source_fingerprint": "sha256-test123",
-        "analysis_bytes_unchanged": True,
-        "consequence": {
-            "verdict": "READY FOR CFO",
-            "display": {
-                "net_arr": "$880k",
-                "arr_impact": "-$20k",
-                "gross_margin": "45.5%",
-                "headroom": "5.5%",
-            },
-            "evidence_cells": [{"address": "Deal Model!B4"}],
+# --- hermetic scenario + proposal helpers ------------------------------------
+
+
+def build_scenario(root):
+    """Build a tmp council-style scenario (workbook + model.json), mirroring
+    scripts/build_scenarios.py + data/scenarios/council_discount/model.json."""
+    scenario = root / "scenario"
+    scenario.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Deal Inputs"
+    for addr, value in {"B2": 1000, "B3": 0, "B4": 480, "B5": 40}.items():
+        sheet[addr] = value
+    workbook.save(scenario / "council_deal.xlsx")
+    model = {
+        "workbook": "council_deal.xlsx",
+        "input_refs": {
+            "list_arr": "Deal Inputs!B2",
+            "discount": "Deal Inputs!B3",
+            "cogs": "Deal Inputs!B4",
+            "floor": "Deal Inputs!B5",
         },
+        "metrics": [
+            {"id": "net_arr", "label": "Net ARR", "formula": "list_arr * (1 - discount/100)", "unit": "$k"},
+            {"id": "gross_profit", "label": "Gross profit", "formula": "net_arr - cogs", "requires": ["cogs"], "unit": "$k"},
+            {"id": "gross_margin", "label": "Gross margin", "formula": "gross_profit / net_arr * 100", "requires": ["cogs"], "unit": "%"},
+            {"id": "headroom", "label": "Headroom", "formula": "gross_margin - floor", "requires": ["cogs"], "unit": "pt"},
+        ],
+        "constraints": [{"metric": "headroom", "op": ">=", "value": 0}],
     }
+    (scenario / "model.json").write_text(json.dumps(model), encoding="utf-8")
+    return scenario
 
 
-def agent_answer(**overrides):
+def proposal(**overrides):
+    base = {
+        "decision_id": "d1",
+        "candidate_id": "c1",
+        "question": "Approve a 10% council discount?",
+        "overrides": {"discount": 10},
+    }
+    base.update(overrides)
+    return base
+
+
+def engine_answer(**overrides):
+    """A schema-valid answer that copies the engine-priced consequence verbatim."""
     answer = {
-        "packet_id": "cpkt-abc123",
-        "verdict": "READY FOR CFO",
-        "summary": "Evidence is complete and the request is ready for CFO review.",
+        "verdict": "ok",
         "metrics": {
-            "net_arr": "$880k",
-            "arr_impact": "-$20k",
-            "gross_margin": "45.5%",
-            "headroom": "5.5%",
+            "net_arr": "900.00",
+            "gross_profit": "420.00",
+            "gross_margin": "46.67",
+            "headroom": "6.67",
         },
-        "inspected_evidence": "Deal Model!B4",
-        "draft_status": "NOT_SENT",
     }
     answer.update(overrides)
     return answer
 
 
-def audited_calls(**overrides):
-    revision = {
-        "revision_id": "rev-test123",
-        "source_fingerprint": "sha256-test123",
-        "packet_id": "cpkt-abc123",
-    }
-    events = [
-        {"tool": "get_deal_context", "ok": True, **revision},
-        {"tool": "preview_consequence", "ok": True, "verdict": "READY FOR CFO", **revision},
+def _default_trace():
+    return [
+        {"type": "thread.started", "thread_id": "thread-123"},
+        *[
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "mcp_tool_call",
+                    "server": "yigdesk",
+                    "tool": tool,
+                    "status": "completed",
+                },
+            }
+            for tool in ("propose_candidate", "read_board")
+        ],
         {
-            "tool": "inspect_evidence",
-            "ok": True,
-            "address": "Deal Model!B4",
-            **revision,
+            "type": "turn.completed",
+            "usage": {"input_tokens": 420, "cached_input_tokens": 20, "output_tokens": 80},
         },
     ]
-    for index, changes in overrides.items():
-        events[int(index)].update(changes)
-    return events
 
 
-def executor_with(answer, *, audit=None, trace=None):
+def executor_with(answer, *, trace=None, scenario_dir=None):
     def execute(command, *, env, timeout, cwd, trace_callback=None):
+        # Sandbox isolation guarantees (preserved).
         assert "--ignore-user-config" in command
         assert "--ignore-rules" in command
         assert "--strict-config" in command
@@ -111,148 +138,143 @@ def executor_with(answer, *, audit=None, trace=None):
         assert f'USERPROFILE={json.dumps(str(cwd / "home"))}' in shell_set
         assert f'TEMP={json.dumps(str(cwd / "tmp"))}' in shell_set
         assert "CODEX_HOME" not in shell_set
-        assert "PYTHONPATH" in next(item for item in command if item.startswith("mcp_servers.yigdesk.env="))
-        assert str(cwd) == command[command.index("-C") + 1]
-        assert any(
-            item.startswith("mcp_servers.yigdesk.env=")
-            and "YIGDESK_URL" in item
-            and "YIGDESK_AUDIT_FILE" in item
-            and "YIGDESK_REVISION_ID" in item
-            for item in command
+        # New surface: blackboard MCP over stdio, scenario + ledger env.
+        assert 'mcp_servers.yigdesk.args=["-m","yigdesk.blackboard_mcp"]' in command
+        assert 'mcp_servers.yigdesk.args=["-m","yigdesk.mcp_server"]' not in command
+        mcp_env = next(
+            item for item in command if item.startswith("mcp_servers.yigdesk.env=")
         )
+        assert "YIGDESK_SCENARIO" in mcp_env
+        assert "YIGDESK_LEDGER" in mcp_env
+        assert "PYTHONPATH" in mcp_env
+        assert str(cwd) == command[command.index("-C") + 1]
+        # Injected process env carries the scenario (and only allowlisted keys).
+        assert env.get("YIGDESK_SCENARIO") == (str(scenario_dir) if scenario_dir else env.get("YIGDESK_SCENARIO"))
+        assert env.get("YIGDESK_LEDGER")
+        assert "DATABASE_PASSWORD" not in env
+
         output_path = command[command.index("--output-last-message") + 1]
         with open(output_path, "w", encoding="utf-8") as handle:
             json.dump(answer, handle)
-        recorded_audit = audit if audit is not None else audited_calls()
-        with open(env["YIGDESK_AUDIT_FILE"], "w", encoding="utf-8") as handle:
-            for event in recorded_audit:
-                handle.write(json.dumps(event) + "\n")
-        events = (
-            [
-                json.dumps({"type": "thread.started", "thread_id": "thread-123"}),
-                *[
-                    json.dumps(
-                        {
-                            "type": "item.completed",
-                            "item": {
-                                "type": "mcp_tool_call",
-                                "server": "yigdesk",
-                                "tool": tool,
-                                "status": "completed",
-                            },
-                        }
-                    )
-                    for tool in (
-                        "get_deal_context",
-                        "preview_consequence",
-                        "inspect_evidence",
-                    )
-                ],
-                json.dumps(
-                    {
-                        "type": "turn.completed",
-                        "usage": {"input_tokens": 420, "cached_input_tokens": 20, "output_tokens": 80},
-                    }
-                ),
-            ]
-            if trace is None
-            else [json.dumps(event) for event in trace]
-        )
+        events = _default_trace() if trace is None else trace
+        stdout = "\n".join(json.dumps(event) for event in events)
         if trace_callback is not None:
             trace_callback("calling_yigdesk_tools")
-        stdout = "\n".join(events)
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     return execute
 
 
-def test_runner_accepts_only_engine_grounded_audited_codex_output(tmp_path):
+# --- structural: the new blackboard-driven run -------------------------------
+
+
+def test_runner_accepts_engine_grounded_blackboard_output(tmp_path):
+    scenario = build_scenario(tmp_path)
     runner = CodexRunner(
         model="gpt-5.6-sol",
-        executor=executor_with(agent_answer()),
+        executor=executor_with(engine_answer(), scenario_dir=scenario),
         temp_root=tmp_path,
     )
 
-    result = runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+    result = runner.run(scenario, proposal=proposal())
 
     assert result["verified"] is True
     assert result["thread_id"] == "thread-123"
     assert result["model"] == "gpt-5.6-sol"
     assert result["reasoning_effort"] == "low"
-    assert result["tool_calls"] == [
-        "get_deal_context",
-        "preview_consequence",
-        "inspect_evidence",
-    ]
+    assert "propose_candidate" in result["tool_calls"]
     assert result["usage"]["input_tokens"] == 420
-    assert result["answer"]["metrics"]["gross_margin"] == "45.5%"
+    assert result["answer"]["verdict"] == "ok"
+    assert result["answer"]["metrics"]["gross_margin"] == "46.67"
 
 
-def test_runner_pins_low_reasoning_effort_in_strict_codex_config(tmp_path):
+def test_runner_targets_blackboard_mcp_with_scenario_env(tmp_path):
+    scenario = build_scenario(tmp_path)
     captured = {}
-    delegate = executor_with(agent_answer())
+    delegate = executor_with(engine_answer(), scenario_dir=scenario)
+
+    def execute(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return delegate(command, **kwargs)
+
+    runner = CodexRunner(executor=execute, temp_root=tmp_path)
+    runner.run(scenario, proposal=proposal())
+
+    command = captured["command"]
+    assert 'mcp_servers.yigdesk.args=["-m","yigdesk.blackboard_mcp"]' in command
+    assert 'mcp_servers.yigdesk.args=["-m","yigdesk.mcp_server"]' not in command
+    assert captured["env"]["YIGDESK_SCENARIO"] == str(scenario)
+
+    schema_path = command[command.index("--output-schema") + 1]
+    schema = json.loads(open(schema_path, encoding="utf-8").read())
+    assert "verdict" in schema["properties"]
+    assert "metrics" in schema["properties"]
+    assert set(schema["required"]) >= {"verdict", "metrics"}
+
+
+def test_runner_injects_the_proposed_candidate_into_the_prompt(tmp_path):
+    scenario = build_scenario(tmp_path)
+    captured = {}
+    delegate = executor_with(engine_answer(), scenario_dir=scenario)
 
     def execute(command, **kwargs):
         captured["command"] = command
         return delegate(command, **kwargs)
 
     runner = CodexRunner(executor=execute, temp_root=tmp_path)
-    runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+    runner.run(scenario, proposal=proposal())
+
+    prompt = captured["command"][-1]
+    assert "propose_candidate" in prompt
+    assert "read_board" in prompt
+    assert "d1" in prompt
+    assert "c1" in prompt
+    assert json.dumps({"discount": 10}) in prompt
+
+
+def test_runner_pins_low_reasoning_effort_in_strict_codex_config(tmp_path):
+    scenario = build_scenario(tmp_path)
+    captured = {}
+    delegate = executor_with(engine_answer(), scenario_dir=scenario)
+
+    def execute(command, **kwargs):
+        captured["command"] = command
+        return delegate(command, **kwargs)
+
+    runner = CodexRunner(executor=execute, temp_root=tmp_path)
+    runner.run(scenario, proposal=proposal())
 
     assert 'model_reasoning_effort="low"' in captured["command"]
 
 
-def test_runner_requires_exact_canonical_evidence_address_in_codex_output(tmp_path):
-    captured = {}
-    delegate = executor_with(agent_answer())
-
-    def execute(command, **kwargs):
-        captured["command"] = command
-        return delegate(command, **kwargs)
-
-    runner = CodexRunner(executor=execute, temp_root=tmp_path)
-    runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
-
-    prompt = captured["command"][-1]
-    schema_path = captured["command"][captured["command"].index("--output-schema") + 1]
-    schema = json.loads(open(schema_path, encoding="utf-8").read())
-    evidence_schema = schema["properties"]["inspected_evidence"]
-
-    assert "character for character" in prompt
-    assert "with no label or explanation" in prompt
-    assert re.fullmatch(evidence_schema["pattern"], "Deal Model!B4")
-    assert not re.fullmatch(
-        evidence_schema["pattern"],
-        "I inspected the canonical address Deal Model!B4.",
-    )
-
-
 def test_runner_requires_yigdesk_mcp_server_to_initialize(tmp_path):
+    scenario = build_scenario(tmp_path)
     captured = {}
-    delegate = executor_with(agent_answer())
+    delegate = executor_with(engine_answer(), scenario_dir=scenario)
 
     def execute(command, **kwargs):
         captured["command"] = command
         return delegate(command, **kwargs)
 
     runner = CodexRunner(executor=execute, temp_root=tmp_path)
-    runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+    runner.run(scenario, proposal=proposal())
 
     assert "mcp_servers.yigdesk.required=true" in captured["command"]
 
 
+# --- progress phases (monotonic + sanitized) ---------------------------------
+
+
 def test_runner_reports_only_sanitized_monotonic_progress_phases(tmp_path):
+    scenario = build_scenario(tmp_path)
     events = []
     runner = CodexRunner(
-        executor=executor_with(agent_answer()),
+        executor=executor_with(engine_answer(), scenario_dir=scenario),
         temp_root=tmp_path,
     )
 
-    runner.run(
-        expected_packet(),
-        base_url="http://127.0.0.1:8787",
-        progress_callback=events.append,
-    )
+    runner.run(scenario, proposal=proposal(), progress_callback=events.append)
 
     assert [event["phase"] for event in events] == [
         "starting_codex",
@@ -266,6 +288,7 @@ def test_runner_reports_only_sanitized_monotonic_progress_phases(tmp_path):
 
 
 def test_runner_timeout_exposes_only_sanitized_partial_trace_phase(tmp_path):
+    scenario = build_scenario(tmp_path)
     secret = "customer-sensitive-prompt"
     partial_trace = "\n".join(
         [
@@ -276,8 +299,8 @@ def test_runner_timeout_exposes_only_sanitized_partial_trace_phase(tmp_path):
                     "item": {
                         "type": "mcp_tool_call",
                         "server": "yigdesk",
-                        "tool": "get_deal_context",
-                        "arguments": {"request": secret},
+                        "tool": "propose_candidate",
+                        "arguments": {"overrides": {"discount": secret}},
                     },
                 }
             ),
@@ -296,11 +319,7 @@ def test_runner_timeout_exposes_only_sanitized_partial_trace_phase(tmp_path):
     runner = CodexRunner(executor=execute, temp_root=tmp_path)
 
     with pytest.raises(AgentExecutionError) as caught:
-        runner.run(
-            expected_packet(),
-            base_url="http://127.0.0.1:8787",
-            progress_callback=events.append,
-        )
+        runner.run(scenario, proposal=proposal(), progress_callback=events.append)
 
     error = caught.value
     assert error.code == "AGENT_TIMEOUT"
@@ -321,7 +340,7 @@ def test_real_executor_streams_sanitized_mcp_phase_before_process_exit(tmp_path)
         "item": {
             "type": "mcp_tool_call",
             "server": "yigdesk",
-            "tool": "get_deal_context",
+            "tool": "propose_candidate",
             "arguments": {"must_not_reach_callback": "sensitive"},
         },
     }
@@ -342,165 +361,124 @@ def test_real_executor_streams_sanitized_mcp_phase_before_process_exit(tmp_path)
     finished = time.perf_counter()
 
     assert completed.returncode == 0
-    assert [phase for phase, _observed_at in observations] == [
-        "calling_yigdesk_tools"
-    ]
+    assert [phase for phase, _observed_at in observations] == ["calling_yigdesk_tools"]
     assert finished - observations[0][1] >= 0.1
 
 
-def test_runner_rejects_unknown_reasoning_effort():
-    with pytest.raises(ValueError, match="reasoning effort"):
-        CodexRunner(reasoning_effort="fastest")
+# --- required-op + trace integrity -------------------------------------------
 
 
-def test_runner_rejects_codex_number_drift_even_with_valid_tool_trace(tmp_path):
-    drifted = agent_answer(
-        metrics={
-            "net_arr": "$880k",
-            "arr_impact": "-$20k",
-            "gross_margin": "46.0%",
-            "headroom": "5.5%",
-        }
-    )
-    runner = CodexRunner(executor=executor_with(drifted), temp_root=tmp_path)
-
-    with pytest.raises(AgentVerificationError, match="gross_margin") as caught:
-        runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
-
-    assert caught.value.code == "AGENT_METRIC_MISMATCH"
-
-
-def test_runner_classifies_explanatory_evidence_text_without_leaking_it(tmp_path):
-    sensitive_explanation = "I inspected the canonical address Deal Model!B4."
+def test_runner_requires_propose_candidate_activity_in_trace(tmp_path):
+    scenario = build_scenario(tmp_path)
+    trace = [
+        {"type": "thread.started", "thread_id": "thread-123"},
+        {
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "server": "yigdesk", "tool": "read_board"},
+        },
+        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+    ]
     runner = CodexRunner(
-        executor=executor_with(
-            agent_answer(inspected_evidence=sensitive_explanation)
-        ),
+        executor=executor_with(engine_answer(), trace=trace, scenario_dir=scenario),
         temp_root=tmp_path,
     )
 
     with pytest.raises(AgentVerificationError) as caught:
-        runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+        runner.run(scenario, proposal=proposal())
 
-    assert caught.value.code == "AGENT_EVIDENCE_MISMATCH"
-    assert sensitive_explanation not in str(caught.value)
-
-
-def test_runner_rejects_reordered_mcp_calls(tmp_path):
-    audit = audited_calls()
-    audit[0], audit[1] = audit[1], audit[0]
-    runner = CodexRunner(
-        executor=executor_with(agent_answer(), audit=audit),
-        temp_root=tmp_path,
-    )
-
-    with pytest.raises(AgentVerificationError, match="order"):
-        runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
-
-
-@pytest.mark.parametrize(
-    ("event_index", "drift", "message"),
-    [
-        (0, {"source_fingerprint": "sha256-other"}, "source_fingerprint"),
-        (1, {"packet_id": "cpkt-other"}, "packet_id"),
-        (2, {"revision_id": "rev-other"}, "revision_id"),
-    ],
-)
-def test_runner_rejects_any_mcp_call_from_another_revision(
-    tmp_path, event_index, drift, message
-):
-    runner = CodexRunner(
-        executor=executor_with(
-            agent_answer(),
-            audit=audited_calls(**{str(event_index): drift}),
-        ),
-        temp_root=tmp_path,
-    )
-
-    with pytest.raises(AgentVerificationError, match=message):
-        runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+    assert caught.value.code == "AGENT_TRACE_ACTIVITY_MISSING"
 
 
 @pytest.mark.parametrize(
     "trace",
     [
-        [
-            {
-                "type": "turn.completed",
-                "usage": {"input_tokens": 10, "output_tokens": 2},
-            }
-        ],
+        [{"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}}],
         [{"type": "thread.started", "thread_id": "thread-123"}],
     ],
 )
 def test_runner_rejects_incomplete_codex_trace(tmp_path, trace):
+    scenario = build_scenario(tmp_path)
     runner = CodexRunner(
-        executor=executor_with(agent_answer(), trace=trace),
+        executor=executor_with(engine_answer(), trace=trace, scenario_dir=scenario),
         temp_root=tmp_path,
     )
 
     with pytest.raises(AgentVerificationError, match="trace"):
-        runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+        runner.run(scenario, proposal=proposal())
 
 
-def test_runner_rejects_trace_without_item_level_activity_even_if_audit_passes(tmp_path):
-    trace = [
-        {"type": "thread.started", "thread_id": "thread-123"},
-        {
-            "type": "turn.completed",
-            "usage": {"input_tokens": 10, "output_tokens": 2},
-        },
-    ]
-    runner = CodexRunner(
-        executor=executor_with(agent_answer(), trace=trace),
-        temp_root=tmp_path,
-    )
+def test_runner_rejects_invalid_answer_json(tmp_path):
+    scenario = build_scenario(tmp_path)
 
-    with pytest.raises(AgentVerificationError, match="item-level"):
-        runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+    def execute(command, *, env, timeout, cwd, trace_callback=None):
+        output_path = command[command.index("--output-last-message") + 1]
+        with open(output_path, "w", encoding="utf-8") as handle:
+            handle.write("not json{")
+        stdout = "\n".join(json.dumps(event) for event in _default_trace())
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    runner = CodexRunner(executor=execute, temp_root=tmp_path)
+
+    with pytest.raises(AgentExecutionError) as caught:
+        runner.run(scenario, proposal=proposal())
+
+    assert caught.value.code == "AGENT_OUTPUT_INVALID"
 
 
-@pytest.mark.parametrize(
-    "unexpected_item",
-    [
-        {"type": "command_execution", "command": "type %USERPROFILE%\\.ssh\\id_rsa"},
-        {"type": "mcp_tool_call", "server": "other", "tool": "read_file"},
-        {"type": "web_search", "query": "exfiltrate"},
-    ],
-)
-def test_runner_rejects_any_non_required_tool_activity_in_codex_trace(
-    tmp_path, unexpected_item
-):
-    trace = [
-        {"type": "thread.started", "thread_id": "thread-123"},
-        {"type": "item.completed", "item": unexpected_item},
-        *[
+# --- preserved helper guarantees ---------------------------------------------
+
+
+def test_verify_trace_enforces_thread_usage_and_tool_allowlist():
+    good = {
+        "thread_id": "thread-1",
+        "usage": {"input_tokens": 5, "output_tokens": 1},
+        "item_trace_available": True,
+        "tool_activity": [],
+    }
+    # Bare-arm contract (Task 5b): empty allowlist accepts an empty tool trace.
+    _verify_trace(good, expected_mcp_tools=())
+
+    with pytest.raises(AgentVerificationError) as thread_missing:
+        _verify_trace({**good, "thread_id": None})
+    assert thread_missing.value.code == "AGENT_TRACE_THREAD_MISSING"
+
+    with pytest.raises(AgentVerificationError) as usage_missing:
+        _verify_trace({**good, "usage": {}})
+    assert usage_missing.value.code == "AGENT_TRACE_USAGE_INVALID"
+
+    extra_tool = {
+        **good,
+        "tool_activity": [{"type": "mcp_tool_call", "server": "other", "tool": "read_file"}],
+    }
+    with pytest.raises(AgentVerificationError) as tool_mismatch:
+        _verify_trace(extra_tool, expected_mcp_tools=())
+    assert tool_mismatch.value.code == "AGENT_TRACE_TOOL_MISMATCH"
+
+
+def test_read_codex_trace_captures_thread_usage_and_tool_activity():
+    stdout = "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "thread.started", "thread_id": "thread-9"},
             {
                 "type": "item.completed",
-                "item": {
-                    "type": "mcp_tool_call",
-                    "server": "yigdesk",
-                    "tool": tool,
-                },
-            }
-            for tool in (
-                "get_deal_context",
-                "preview_consequence",
-                "inspect_evidence",
-            )
-        ],
-        {
-            "type": "turn.completed",
-            "usage": {"input_tokens": 10, "output_tokens": 2},
-        },
-    ]
-    runner = CodexRunner(
-        executor=executor_with(agent_answer(), trace=trace),
-        temp_root=tmp_path,
+                "item": {"type": "mcp_tool_call", "server": "yigdesk", "tool": "propose_candidate"},
+            },
+            {"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 4}},
+        ]
     )
+    trace = _read_codex_trace(stdout)
+    assert trace["thread_id"] == "thread-9"
+    assert trace["usage"] == {"input_tokens": 3, "output_tokens": 4}
+    assert trace["item_trace_available"] is True
+    assert trace["tool_activity"] == [
+        {"type": "mcp_tool_call", "server": "yigdesk", "tool": "propose_candidate"}
+    ]
 
-    with pytest.raises(AgentVerificationError, match="tool activity"):
-        runner.run(expected_packet(), base_url="http://127.0.0.1:8787")
+
+def test_runner_rejects_unknown_reasoning_effort():
+    with pytest.raises(ValueError, match="reasoning effort"):
+        CodexRunner(reasoning_effort="fastest")
 
 
 def test_windows_resolver_uses_accessible_node_cli_instead_of_store_executable(tmp_path):

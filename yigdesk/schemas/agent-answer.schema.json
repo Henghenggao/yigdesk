@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "metrics"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The engine-returned consequence verdict, copied verbatim; never recomputed. HOLD is terminal."
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Each scenario metric id mapped to the engine-priced display value, copied verbatim from the propose_candidate consequence.",
+      "additionalProperties": { "type": "string" }
+    }
+  }
+}
