@@ -5,13 +5,15 @@ import os
 import secrets
 import threading
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, request
 from werkzeug.exceptions import RequestEntityTooLarge
 
+from .board import board_dict, build_blackboard_from_env
+from .core.gate import Pending
 from .importer import (
     MAX_UPLOAD_BYTES,
     WorkbookImportError,
@@ -249,6 +251,52 @@ def create_app(
                 return jsonify(_state_payload(state)), 201
         except WorkbookImportError as error:
             return jsonify({"code": error.code, "error": str(error)}), 400
+
+    HUMAN_OPS = {"cast_approval", "request_resolve"}
+    VERDICTS = {"approve", "hold", "reject"}
+
+    @app.get("/api/board")
+    def get_board():
+        return jsonify(board_dict(build_blackboard_from_env().project()))
+
+    @app.post("/api/board/op")
+    def board_op():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"code": "INVALID_REQUEST", "error": "JSON object required"}), 400
+        kind = body.get("kind")
+        decision_id = body.get("decision_id")
+        payload = body.get("payload") or {}
+        if kind not in HUMAN_OPS:
+            return jsonify({"code": "OP_NOT_ALLOWED", "error": "kind must be cast_approval or request_resolve"}), 400
+        bb = build_blackboard_from_env()
+        d = bb.project().decisions.get(decision_id)
+        if d is None:
+            return jsonify({"code": "UNKNOWN_DECISION", "error": "no such decision"}), 400
+        if kind == "cast_approval":
+            verdict = payload.get("verdict")
+            scope = payload.get("scope")
+            role = payload.get("role")
+            if verdict not in VERDICTS:
+                return jsonify({"code": "BAD_VERDICT", "error": "verdict must be approve|hold|reject"}), 400
+            required_roles = {a["role"] for a in d.policy.get("required_approvals", [])}
+            if required_roles and role not in required_roles:
+                return jsonify({"code": "BAD_ROLE", "error": f"role must be one of {sorted(required_roles)}"}), 400
+            selector = d.policy.get("candidate_selector", "human_selected")
+            if scope != decision_id:                        # candidate-scoped
+                if scope not in d.candidates:
+                    return jsonify({"code": "UNKNOWN_SCOPE", "error": "scope must be a candidate id or the decision id"}), 400
+            elif verdict == "approve" and selector == "human_selected":
+                return jsonify({"code": "SELECTION_REQUIRED", "error": "human_selected requires a candidate scope"}), 400
+            bb.cast_approval(decision_id, verdict, scope, actor="human:web", role=role)
+            return jsonify({"board": board_dict(bb.project()), "result": None})
+        # request_resolve (idempotent in core)
+        already = d.resolution is not None
+        result = bb.request_resolve(decision_id, actor="human:web", role="reviewer")
+        if isinstance(result, Pending):
+            return jsonify({"board": board_dict(bb.project()), "result": {"pending": result.reason}})
+        return jsonify({"board": board_dict(bb.project()),
+                        "result": {"record": asdict(result), "replayed": already}})
 
     return app
 
