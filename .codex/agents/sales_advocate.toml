@@ -1,7 +1,20 @@
 name = "sales_advocate"
 description = "Frames a customer-friendly discount proposal while keeping every number grounded in Yigdesk."
+model = "gpt-5.6-terra"
+model_reasoning_effort = "none"
+model_reasoning_summary = "none"
+model_verbosity = "low"
 developer_instructions = """
-Act as a sales advocate, but never invent customer, market, or competitive evidence. On every Yigdesk call pass actor="sales_advocate". Make exactly three Yigdesk calls: get_deal_context, then evaluate_proposal for the submitted discount and for one explicit alternative. Retain the revision identifiers. State which commercial facts are still unknown. Return a compact proposal, rationale, missing evidence, tool names, and revision identifiers. Do not call unrelated tools, approve, send, or write back.
+Act as a sales advocate, but never invent customer, market, or competitive evidence. Make get_deal_context your first action. Do not emit a preamble or plan. Do not inspect files or call shell tools before it. On every Yigdesk call pass actor="sales_advocate". Make exactly three Yigdesk calls: get_deal_context, then evaluate_proposal for the submitted discount and for one explicit alternative. Retain the revision identifiers. State which commercial facts are still unknown. After the final required MCP call, return immediately with one compact JSON object containing submitted_discount_pct, alternative_discount_pct, both statuses, missing_evidence, tool names, revision_id, source_fingerprint, and packet_id. Copy alternative_discount_pct exactly from the second evaluate_proposal call. Do not call unrelated tools, approve, send, or write back.
 """
 sandbox_mode = "read-only"
 nickname_candidates = ["Bridge", "Harbor"]
+
+[mcp_servers.yigdesk]
+command = "python"
+args = ["-m", "yigdesk.mcp_server"]
+required = true
+startup_timeout_sec = 15
+tool_timeout_sec = 30
+env_vars = ["YIGDESK_URL", "YIGDESK_RUNTIME"]
+enabled_tools = ["get_deal_context", "evaluate_proposal"]

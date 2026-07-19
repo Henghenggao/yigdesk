@@ -1,11 +1,13 @@
 from pathlib import Path
 from io import BytesIO
+import json
 import threading
 import time
 
 import yigdesk.app as app_module
 from yigdesk.agent import AgentExecutionError, AgentVerificationError
 from yigdesk.app import create_app
+from yigdesk.session import load_active_session
 from yigdesk.workbook import create_workbook, fingerprint
 from scripts.generate_sample_workbook import generate
 
@@ -202,6 +204,51 @@ def test_agent_run_is_explicitly_unavailable_without_codex_configuration(tmp_pat
     }
     assert response.status_code == 503
     assert response.get_json()["code"] == "CODEX_UNAVAILABLE"
+
+
+def test_legacy_codex_environment_flag_no_longer_starts_a_nested_runner(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("YIGDESK_CODEX_ENABLED", "1")
+    monkeypatch.delenv("YIGDESK_NESTED_CODEX_ENABLED", raising=False)
+
+    app = create_app(
+        runtime_dir=tmp_path / "runtime",
+        agent_runner=FakeCodexRunner(),
+    )
+
+    assert app.test_client().get("/api/state").get_json()["agent"]["available"] is False
+
+
+def test_nested_codex_runner_requires_the_explicit_opt_in_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("YIGDESK_NESTED_CODEX_ENABLED", "1")
+
+    app = create_app(
+        runtime_dir=tmp_path / "runtime",
+        agent_runner=FakeCodexRunner(),
+    )
+
+    agent = app.test_client().get("/api/state").get_json()["agent"]
+    assert agent["available"] is True
+    assert agent["mode"] == "codex-mcp"
+
+
+def test_council_status_requires_a_bound_session_without_starting_codex(tmp_path):
+    _, client = make_client(tmp_path)
+
+    response = client.get("/api/council-status")
+
+    assert response.status_code == 200
+    status = response.get_json()
+    assert status["mode"] == "codex-work"
+    assert status["status"] == "unbound"
+    assert status["expected_call_count"] == 15
+    assert set(status["roles"]) == {
+        "finance_analyst",
+        "sales_advocate",
+        "risk_challenger",
+        "decision_optimizer",
+    }
 
 
 def test_agent_run_returns_engine_packet_and_verified_codex_trace(tmp_path):
@@ -467,7 +514,14 @@ def test_uploaded_workbook_drives_live_scenario_and_source_proof(tmp_path):
 
     assert response.status_code == 201
     payload = response.get_json()
-    assert payload["scenario_id"].startswith("upload-")
+    bound = load_active_session(tmp_path / "runtime")
+    assert payload["scenario_id"].startswith("bound-")
+    assert payload["session"] == {
+        "protocol_version": "yigdesk-session/v1",
+        "session_id": bound.session_id,
+        "revision_id": bound.manifest["revision_id"],
+    }
+    assert payload["revision"]["revision_id"] == bound.manifest["revision_id"]
     assert payload["scenario"]["list_arr_k"] == "14658.2"
     assert payload["scenario"]["cogs_k"] == "10031.0"
     assert payload["source"]["kind"] == "uploaded-synthetic-xlsx"
@@ -485,7 +539,58 @@ def test_uploaded_workbook_drives_live_scenario_and_source_proof(tmp_path):
         "headroom": "0.2%",
         "requested_discount": "2.0%",
     }
-    assert app.config["YIGDESK_STATE"].active_source_path.read_bytes() == source_bytes
+    assert app.config["YIGDESK_STATE"].active_source_path == bound.source_path
+    assert bound.source_path.read_bytes() == source_bytes
+    assert not bound.audit_path.exists()
+
+
+def test_council_status_tracks_codex_work_audit_on_the_uploaded_revision(tmp_path):
+    app, client = make_client(tmp_path)
+    upload_path = generate(tmp_path / "northwind-council.xlsx")
+    uploaded = client.post(
+        "/api/upload",
+        data={
+            "workbook": (BytesIO(upload_path.read_bytes()), "northwind-council.xlsx"),
+            "requested_discount_pct": "2",
+            "margin_floor_pct": "30",
+        },
+        content_type="multipart/form-data",
+    ).get_json()
+    bound = load_active_session(tmp_path / "runtime")
+
+    idle = client.get("/api/council-status")
+    assert idle.status_code == 200
+    assert idle.get_json()["status"] == "idle"
+
+    revision = uploaded["revision"]
+    events = [
+        {
+            "actor": "finance_analyst",
+            "tool": "get_deal_context",
+            "ok": True,
+            **revision,
+        },
+        {
+            "actor": "finance_analyst",
+            "tool": "find_feasible_boundary",
+            "ok": True,
+            "step_pct": "0.01",
+            "largest_safe_step_pct": "2.23",
+            **revision,
+        },
+    ]
+    bound.audit_path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events),
+        encoding="utf-8",
+    )
+
+    running = client.get("/api/council-status")
+    assert running.status_code == 200
+    payload = running.get_json()
+    assert payload["status"] == "running"
+    assert payload["revision"] == revision
+    assert payload["roles"]["finance_analyst"]["completed"] == 2
+    assert "step_pct" not in str(payload)
 
 
 def test_proposal_tools_share_revision_and_catch_the_display_rounding_trap(tmp_path):

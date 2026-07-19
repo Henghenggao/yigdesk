@@ -38,6 +38,89 @@ class CouncilAuditError(ValueError):
     """The observed A2A tool trace cannot support a council result."""
 
 
+def council_audit_status(
+    events: list[dict[str, Any]],
+    *,
+    expected_revision: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return a content-safe progress view for one actor-attributed audit."""
+
+    expected_call_count = sum(len(tools) for tools in EXPECTED_TOOL_SEQUENCES.values())
+    revision = dict(expected_revision or {})
+    grouped: dict[str, list[str]] = defaultdict(list)
+    identities: set[tuple[str, str, str]] = set()
+    for event in events:
+        actor = event.get("actor")
+        if actor not in EXPECTED_TOOL_SEQUENCES:
+            raise CouncilAuditError("Council audit contains an unattributed or unknown actor.")
+        if event.get("ok") is not True:
+            raise CouncilAuditError(f"Council audit contains a failed call for {actor}.")
+        if any(
+            not event.get(field)
+            for field in ("revision_id", "source_fingerprint", "packet_id")
+        ):
+            raise CouncilAuditError(f"Council audit is missing revision proof for {actor}.")
+        grouped[actor].append(str(event.get("tool", "")))
+        identities.add(
+            (
+                str(event["revision_id"]),
+                str(event["source_fingerprint"]),
+                str(event["packet_id"]),
+            )
+        )
+    if len(identities) > 1:
+        raise CouncilAuditError("Council audit contains revision drift.")
+    if identities:
+        revision_id, source_fingerprint, packet_id = next(iter(identities))
+        observed_revision = {
+            "revision_id": revision_id,
+            "source_fingerprint": source_fingerprint,
+            "packet_id": packet_id,
+        }
+        if expected_revision is not None and observed_revision != expected_revision:
+            raise CouncilAuditError("Council audit does not match the active revision.")
+        revision = observed_revision
+
+    roles: dict[str, dict[str, Any]] = {}
+    accepted_progress_count = 0
+    for actor, expected in EXPECTED_TOOL_SEQUENCES.items():
+        actual = grouped.get(actor, [])
+        completed = _matching_prefix_suffix_length(actual, expected)
+        accepted_progress_count += completed
+        roles[actor] = {
+            "state": (
+                "complete"
+                if completed == len(expected)
+                else "running" if actual else "pending"
+            ),
+            "completed": completed,
+            "expected": len(expected),
+            "tools": expected[:completed],
+        }
+
+    result = {
+        "status": "idle" if not events else "running",
+        "verified": False,
+        "revision": revision,
+        "observed_call_count": len(events),
+        "accepted_progress_count": accepted_progress_count,
+        "expected_call_count": expected_call_count,
+        "roles": roles,
+    }
+    if events and accepted_progress_count == expected_call_count:
+        verified = verify_council_audit(events)
+        result.update(
+            {
+                "status": "verified",
+                "verified": True,
+                "revision": verified["revision"],
+                "observed_call_count": verified["observed_call_count"],
+                "accepted_progress_count": verified["accepted_call_count"],
+            }
+        )
+    return result
+
+
 def verify_council_audit(events: list[dict[str, Any]]) -> dict[str, Any]:
     """Accept only exact per-role suffixes on one immutable revision.
 
@@ -102,6 +185,15 @@ def verify_council_audit(events: list[dict[str, Any]]) -> dict[str, Any]:
             for actor, role_events in accepted.items()
         },
     }
+
+
+def _matching_prefix_suffix_length(actual: list[str], expected: list[str]) -> int:
+    """Find current valid progress while allowing a prior role retry to remain visible."""
+
+    for length in range(min(len(actual), len(expected)), 0, -1):
+        if actual[-length:] == expected[:length]:
+            return length
+    return 0
 
 
 def _verify_call_parameters(

@@ -1608,6 +1608,47 @@ yig-model-inspector dd[data-trust="verified"] {
   text-transform: none;
 }
 
+.council-trace {
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  list-style: none;
+}
+
+.council-trace li {
+  min-width: 0;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-radius: var(--radius-sm);
+  color: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 0 0 1px var(--line-inverse);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.council-trace li[data-state="running"] {
+  color: white;
+  background: rgba(218, 250, 56, 0.08);
+}
+
+.council-trace li[data-state="complete"] {
+  color: var(--evidence);
+  background: rgba(218, 250, 56, 0.13);
+}
+
+.council-trace strong {
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
 .a2a-footer {
   margin-top: 12px;
   display: flex;

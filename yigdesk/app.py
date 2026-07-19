@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from flask import Flask, jsonify, request
 from werkzeug.exceptions import RequestEntityTooLarge
 
+from .a2a import CouncilAuditError, council_audit_status
 from .agent import AgentExecutionError, AgentVerificationError, CodexRunner
 from .engine import (
     DealInputs,
@@ -31,10 +32,14 @@ from .engine import (
 from .importer import (
     MAX_UPLOAD_BYTES,
     WorkbookImportError,
-    import_synthetic_workbook,
     parse_decimal_field,
 )
-from .session import BoundSession, live_revision_id, load_active_session
+from .session import (
+    BoundSession,
+    bind_synthetic_session,
+    live_revision_id,
+    load_active_session,
+)
 from .workbook import create_workbook, fingerprint, inspect_cell, read_inputs, workbook_snapshot
 
 
@@ -113,34 +118,24 @@ class DemoState:
         margin_floor_pct,
         current_discount_pct,
     ) -> None:
-        """Validate one upload, then atomically make its derived revision current."""
+        """Bind one upload as the immutable session shared with Codex Work."""
 
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         candidate = self.runtime_dir / ("upload-candidate-" + secrets.token_hex(6) + ".xlsx")
         candidate.write_bytes(source_bytes)
         try:
-            imported = import_synthetic_workbook(
+            bind_synthetic_session(
                 candidate,
+                runtime_root=self.runtime_dir,
                 original_filename=original_filename,
                 requested_discount_pct=requested_discount_pct,
                 margin_floor_pct=margin_floor_pct,
                 current_discount_pct=current_discount_pct,
             )
-            projection = self.runtime_dir / ("projection-" + secrets.token_hex(6) + ".xlsx")
-            create_workbook(projection, imported.scenario)
-        except Exception:
+            bound = load_active_session(self.runtime_dir)
+            self.load_bound_session(bound)
+        finally:
             candidate.unlink(missing_ok=True)
-            raise
-        upload_source = self.runtime_dir / "uploaded-source.xlsx"
-        upload_projection = self.runtime_dir / "yigdesk-demo.xlsx"
-        candidate.replace(upload_source)
-        projection.replace(upload_projection)
-        self.active_source_path = upload_source
-        self.active_workbook_path = upload_projection
-        self.bound_session_id = None
-        self.current_scenario = imported.scenario
-        self.source = {**imported.source, "sha256": fingerprint(self.active_source_path)}
-        self.scenario_id = "upload-" + self.source["sha256"][:12]
 
 
 @dataclass(frozen=True)
@@ -282,7 +277,7 @@ def create_app(
     requested_agent = (
         agent_enabled
         if agent_enabled is not None
-        else os.environ.get("YIGDESK_CODEX_ENABLED", "0") == "1"
+        else os.environ.get("YIGDESK_NESTED_CODEX_ENABLED", "0") == "1"
     )
     configured = bool(requested_agent and _is_loopback_host(os.environ.get("HOST", "127.0.0.1")))
     runner = agent_runner or (CodexRunner() if configured else None)
@@ -472,6 +467,46 @@ def create_app(
             return jsonify({"packet": snapshot.packet()})
         with state.lock:
             return jsonify({"packet": _consequence_packet(state)})
+
+    @app.get("/api/council-status")
+    def get_council_status():
+        try:
+            bound = load_active_session(state.runtime_dir)
+        except FileNotFoundError:
+            status = council_audit_status([])
+            return jsonify(
+                {
+                    **status,
+                    "mode": "codex-work",
+                    "status": "unbound",
+                }
+            )
+        with state.lock:
+            expected_revision = _revision_fields(_consequence_packet(state))
+        try:
+            raw = bound.audit_path.read_text(encoding="utf-8")
+            complete_lines = raw.splitlines()
+            if raw and not raw.endswith("\n"):
+                complete_lines = complete_lines[:-1]
+            events = [json.loads(line) for line in complete_lines if line.strip()]
+            status = council_audit_status(
+                events,
+                expected_revision=expected_revision,
+            )
+            return jsonify({"mode": "codex-work", **status})
+        except FileNotFoundError:
+            status = council_audit_status([], expected_revision=expected_revision)
+            return jsonify({"mode": "codex-work", **status})
+        except (CouncilAuditError, json.JSONDecodeError, OSError, TypeError, ValueError):
+            return jsonify(
+                {
+                    "mode": "codex-work",
+                    "status": "rejected",
+                    "verified": False,
+                    "revision": expected_revision,
+                    "error": {"code": "COUNCIL_AUDIT_INVALID"},
+                }
+            )
 
     @app.post("/api/proposals/evaluate")
     def evaluate_one_proposal():

@@ -29,10 +29,12 @@ read-only and prevents a persuasive agent from overriding exact policy math.
 
 The repository includes four current Codex custom agents under
 `.codex/agents/`: `finance_analyst`, `sales_advocate`, `risk_challenger`, and
-`decision_optimizer`. They inherit the parent session's model, reasoning level,
-tools, and read-only Yigdesk MCP configuration. Each role passes an allowlisted
+`decision_optimizer`. Each role explicitly pins `gpt-5.6-terra`, reasoning effort
+`none`, a role-specific tool allowlist, and the read-only Yigdesk MCP configuration;
+the real performance harness also pins the outer orchestrator and disables Fast.
+Each role passes an allowlisted
 `actor` declaration on every tool call. Because Codex subagents inherit the
-parent MCP client, this label is audit attribution rather than authentication;
+session environment forwarded to their own MCP clients, this label is audit attribution rather than authentication;
 the Codex subagent trace establishes which thread acted, while the independent
 Yigdesk audit establishes the declared role, tool sequence, success, and
 revision consistency.
@@ -52,6 +54,11 @@ Use $yigdesk-council to analyze my attached generated Northwind FY2024 workbook.
 The submitted discount is 2%, current discount is 0%, and gross-margin floor is 30%.
 Run the real challenged council and return only an audit-verified decision.
 ```
+
+If the generated workbook was already uploaded through the browser, use the same task
+and say `Use $yigdesk-council on the current bound Yigdesk revision.` The browser bind,
+Codex agents, verifier, and progress view all resolve that one immutable session. The
+primary path does not launch a nested `codex exec` process.
 
 For the supplied FY2024 synthetic workbook, the requested 2% discount is
 financially feasible at the configured 30% floor. The exact maximum is

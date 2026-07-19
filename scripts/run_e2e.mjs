@@ -9,6 +9,7 @@ const forwardedArgs = process.argv.slice(2);
 const externalBaseURL = process.env.YIGDESK_BASE_URL;
 const port = process.env.YIGDESK_E2E_PORT || '8791';
 const baseURL = externalBaseURL || `http://127.0.0.1:${port}`;
+const runtime = process.env.YIGDESK_RUNTIME || 'runtime/e2e';
 let serverProcess;
 let testProcess;
 let shuttingDown = false;
@@ -93,7 +94,7 @@ try {
         ...process.env,
         HOST: '127.0.0.1',
         PORT: port,
-        YIGDESK_RUNTIME: process.env.YIGDESK_RUNTIME || 'runtime/e2e',
+        YIGDESK_RUNTIME: runtime,
       },
       shell: false,
       stdio: ['ignore', 'inherit', 'inherit'],
@@ -108,7 +109,11 @@ try {
     [playwrightCli, 'test', ...forwardedArgs],
     {
       cwd: process.cwd(),
-      env: { ...process.env, YIGDESK_BASE_URL: baseURL },
+      env: {
+        ...process.env,
+        YIGDESK_BASE_URL: baseURL,
+        YIGDESK_RUNTIME: runtime,
+      },
       shell: false,
       stdio: 'inherit',
       windowsHide: true,

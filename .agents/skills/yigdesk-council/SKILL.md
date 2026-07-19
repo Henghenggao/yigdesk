@@ -20,27 +20,38 @@ control surface.
 - Treat `HOLD`, a bind rejection, revision drift, missing evidence, an incomplete role,
   or a failed audit as terminal for that revision. Do not release an unverified result.
 - Never invent market evidence. Financial feasibility is not commercial optimality.
+- Keep orchestration in the current Codex Work task. Do not launch a nested
+  `codex exec`; use the project custom agents and their inherited Yigdesk MCP client.
 
 ## 1. Resolve the request
 
-Collect exactly these material inputs from the request or attached-file context:
+First, if the request says "uploaded", "current", or "bound revision", run
+`python -m yigdesk.cli state` before asking a question. Reuse an active uploaded
+session when its state already contains the requested decision inputs; the immutable
+session manifest is authoritative for the file path and values.
+
+For a new bind, collect exactly these material inputs from the request or attached-file
+context:
 
 1. One local generated synthetic `.xlsx` path.
 2. Submitted discount percentage.
 3. Gross-margin floor percentage.
 4. Current discount percentage, defaulting to `0` only when omitted.
 
-If the file, submitted discount, or margin floor is missing, ask one concise combined
-question. Do not infer them. Resolve attached files by inspecting the task's available
-file paths; do not ask the user to move the file into the repository.
+If there is no reusable active session and the file, submitted discount, or margin
+floor is missing, ask one concise combined question. Do not infer them. Resolve
+attached files by inspecting the task's available file paths; do not ask the user to
+move the file into the repository.
 
-For a follow-up that explicitly refers to the current bound request and does not change
-the workbook or decision inputs, reuse the current session. Any new file, discount, or
-floor requires a new bind and therefore a new session and audit.
+For a follow-up that refers to the current bound request and does not change the
+workbook or decision inputs, reuse the current session without asking for its original
+path. Any new file, discount, or floor requires a new bind and therefore a new session
+and audit.
 
 ## 2. Bind an immutable session
 
-From the repository root run:
+Skip this section only when Section 1 found a matching active session. Otherwise, from
+the repository root run:
 
 ```powershell
 python -m yigdesk.cli bind --file <absolute-xlsx-path> --discount <submitted> --floor <floor> --current-discount <current>
@@ -53,6 +64,12 @@ must not replace the prior active session. Do not delete or edit anything under
 
 ## 3. Make the read surface available
 
+When the real council E2E harness supplies a verified preflight containing the active
+revision id, source fingerprint, packet id, and all three decision inputs, use that
+bounded identity and do not repeat shell or CLI preflight. This exception exists only
+for the repository's read-only performance harness, which already performed health,
+state, analysis, and active-session checks before launching Codex.
+
 Check `http://127.0.0.1:8787/api/health`. If it is unavailable, start
 `python -m yigdesk.app` in a yielded or long-lived background terminal and wait for the
 health endpoint. In a sandboxed Windows task, prefer a yielded long-running command;
@@ -60,14 +77,26 @@ health endpoint. In a sandboxed Windows task, prefer a yielded long-running comm
 Codex task; do not tell the user to open another terminal or browser.
 
 Run `python -m yigdesk.cli state`. Require its session id, revision id, and source
-fingerprint to equal the bind receipt. Then run `python -m yigdesk.cli analyze`.
+fingerprint to equal the bind receipt or reused active-session identity. Then run
+`python -m yigdesk.cli analyze`.
 If its packet is `HOLD`, return the missing evidence and stop before spawning agents.
+
+## Council latency contract
+
+For every specialist and optimizer `spawn_agent` call, set `fork_turns="none"`.
+Do not copy the parent conversation into a specialist. Send one compact task containing
+only the actor, exact required tool sequence and arguments, submitted discount,
+margin floor, revision id, source fingerprint, packet id, and the expected output
+fields. The spawned agent's first action must be its first required Yigdesk MCP call;
+it must not browse, inspect the repository, run shell commands, write a plan, or emit a
+preamble first. This keeps the real Codex Work path on standard tier with bounded
+context; it does not enable Fast mode or launch a nested `codex exec`.
 
 ## 4. Run the real Codex council
 
 For a Northwind decision-council request, spawn `finance_analyst`, `sales_advocate`,
 and `risk_challenger` in parallel. Give each the submitted discount and the bind
-receipt identity. Require actor attribution on every Yigdesk call and these exact,
+receipt or active-session identity. Require actor attribution on every Yigdesk call and these exact,
 role-specific sequences—no additional Yigdesk calls:
 
 - `finance_analyst`: `get_deal_context`; `find_feasible_boundary(0.01)`;
@@ -79,7 +108,9 @@ role-specific sequences—no additional Yigdesk calls:
   `stress_test_assumption(submitted, 5)`;
   `inspect_evidence("Deal Model!B4")`.
 
-Wait for all three. Require every output to carry the same revision id, source
+Wait for all three with `wait_agent` using a timeout_ms of at least 10000; shorter
+values are invalid and only add a failed orchestration round trip. Require every
+output to carry the same revision id, source
 fingerprint, and packet id. Reject a role result that omits its proposal, evidence, or
 identity.
 
@@ -87,7 +118,8 @@ Only after all three pass the revision gate, spawn `decision_optimizer`. Give it
 three grounded outputs and require exactly:
 
 1. `get_deal_context` with actor `decision_optimizer`.
-2. `compare_proposals` with the unique concrete proposals from the roles.
+2. `compare_proposals` with exactly the submitted, sales alternative, largest safe step, and first unsafe values from the role outputs. Keep all four unique and do
+   not omit the rejected first-unsafe proposal.
 3. `inspect_evidence("Deal Model!B4")` with actor `decision_optimizer`.
 
 If fewer than two unique proposals exist, stop with `HOLD` instead of fabricating one.
@@ -96,7 +128,12 @@ it commercially optimal without supplied commercial evidence.
 
 ## 5. Verify before reporting
 
-Run:
+For the repository's real council E2E only, the harness verifies the audit after Codex exits.
+The outer task must return the schema-bound `READY_FOR_EXTERNAL_AUDIT` candidate
+immediately after the optimizer; it must not run this command or withhold the candidate
+solely because external verification has not yet executed.
+
+For interactive council runs, run:
 
 ```powershell
 python -m scripts.verify_a2a_audit

@@ -7,6 +7,7 @@
     "test:boundary": "python -m pytest tests/test_boundary.py -q",
     "test:mcp": "python -m pytest tests/test_mcp_protocol.py -q",
     "test:e2e": "node scripts/run_e2e.mjs",
+    "test:council-real": "node scripts/run_e2e.mjs --grep \"real Codex Work council\"",
     "verify:a2a": "python -m scripts.verify_a2a_audit",
     "compare": "python -m scripts.compare_agents",
     "capture": "node scripts/capture.mjs"

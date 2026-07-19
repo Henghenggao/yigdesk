@@ -13,21 +13,23 @@ is an honest <code>HOLD</code>.
 
 ## The 2-minute demo
 
-1. Open this repository in Codex, attach `01b_financial_data_clean.xlsx`, and ask
-   `$yigdesk-council` to evaluate a **2.00%** request against a **30.00%** floor.
-2. Codex binds the real file to an immutable session and reports filename, byte size,
-   source-cell count, SHA-256 fingerprint, extracted FY2024 revenue and COGS, and the
-   unchanged-source proof—without asking the user to switch to a terminal.
-3. The same task runs the real specialist council. Its deterministic base analysis is
+1. Start `python -m yigdesk.app`, open <http://127.0.0.1:8787>, and upload the
+   generated FY2024 synthetic XLSX with a **2.00%** request and **30.00%** floor.
+2. The browser parses the real bytes and creates the same immutable session used by
+   Codex Work. Show the filename, source-cell count, SHA-256 fingerprint, extracted
+   revenue and COGS, and unchanged-source proof.
+3. In the repository's Codex task ask: `Use $yigdesk-council on the current bound
+   revision.` The same task runs the real specialist council; the browser's four role
+   counters follow its actor-attributed MCP audit rather than simulated dialogue.
+4. Its deterministic base analysis is
    <code>READY FOR CFO</code>, net ARR <code>$14,365k</code>, ARR impact
    <code>-$293k</code>, gross margin <code>30.2%</code>, and <code>0.2%</code> headroom.
-4. Show the returned decision brief: requested **2.00%** passes, the exact ceiling is
+5. Show the returned decision brief: requested **2.00%** passes, the exact ceiling is
    **2.239020%**, **2.23%** is the largest safe 0.01-point proposal, and **2.24%**
    displays **30.0%** while failing the exact constraint.
-5. Show the verified 15-call audit. Finance, sales, and risk called the same Yigdesk
+6. Show `A2A VERIFIED`: finance, sales, and risk called the same Yigdesk
    revision; `decision_optimizer` ran only after the revision gate passed.
-6. Ask Codex to open <http://127.0.0.1:8787> only if a visual evidence view is useful,
-   then show terminal <code>HOLD</code> with missing cost evidence. No
+7. Show terminal <code>HOLD</code> with missing cost evidence. No
    approval, send, messaging, or business write-back endpoint exists.
 
 See the [natural-language demo guide](docs/NATURAL_LANGUAGE_DEMO.md) for the exact
@@ -46,8 +48,8 @@ headroom      = 45.5% - 40%      = 5.5 points
 ## Run locally
 
 Requirements: Python 3.11+ and Node.js 20+. Local deterministic preview needs no
-OpenAI credential. Real Codex mode requires an authenticated Codex CLI; use an
-existing Codex login locally or a server-side <code>CODEX_API_KEY</code> in automation.
+OpenAI credential. The primary agent flow runs in the repository's authenticated
+Codex Work task and calls the project Yigdesk MCP directly.
 
 ~~~bash
 python -m pip install -r requirements.txt
@@ -68,17 +70,28 @@ With Codex disabled, the button is explicitly
 labeled **Preview consequence locally** and all data plus the five-formula
 adapter remain local and synthetic.
 
-To enable the real Codex + MCP path in PowerShell:
+The browser does not need to spawn a second Codex process. After upload, remain in
+the repository's Codex task and say:
+
+~~~text
+Use $yigdesk-council on the current bound Yigdesk revision. Run the real challenged
+council and return only an audit-verified recommendation.
+~~~
+
+For controlled compatibility testing only, an optional nested single-agent harness
+can be enabled in PowerShell:
 
 ~~~powershell
-$env:YIGDESK_CODEX_ENABLED = "1"
+$env:YIGDESK_NESTED_CODEX_ENABLED = "1"
 $env:YIGDESK_CODEX_MODEL = "gpt-5.6-sol"
 $env:YIGDESK_CODEX_REASONING_EFFORT = "low"
 python -m yigdesk.app
 ~~~
 
-The button is labeled **Analyze with Codex** only in this mode. The verified
-single-agent proof path must call
+The button is labeled **Analyze with nested Codex** only in this opt-in mode. It uses
+standard service tier (no Fast), a 120-second server budget, low reasoning, low
+verbosity, no reasoning summary, the repository's native Codex binary when available,
+and only the three required MCP tools. The verified single-agent proof path must call
 <code>get_deal_context</code>, <code>preview_consequence</code>, and
 <code>inspect_evidence</code>. Yigdesk rejects the answer if the audited tool
 trace, packet ID, verdict, evidence address, or any displayed figure drifts from
@@ -102,8 +115,9 @@ python -m yigdesk.mcp_server
 
 ## Real Codex A2A council
 
-Open this repository in a new Codex task and attach or reference the generated
-synthetic workbook. Project configuration connects the local Yigdesk MCP server,
+Open this repository in a Codex task. Either attach/reference a generated synthetic
+workbook, or upload it in the browser first and ask the Skill to reuse the current
+bound revision. Project configuration connects the local Yigdesk MCP server,
 `.codex/agents/` defines four read-only roles, and the project Skill owns intake,
 service readiness, orchestration, and verification. Ask:
 
@@ -173,6 +187,18 @@ python -m pytest
 npx playwright install chromium
 npm run test:e2e
 ~~~
+
+Authenticated real-browser Council performance E2E (PowerShell):
+
+~~~powershell
+$env:YIGDESK_REAL_COUNCIL = "1"
+npm run test:council-real
+~~~
+
+This uploads the generated synthetic workbook in Playwright and requires the real
+15-call Council, candidate-schema check, revision gate, and audit verification to
+finish within the 120-second process budget. It uses `gpt-5.6-terra` on standard
+service tier with Fast disabled.
 
 ## What is open here
 
