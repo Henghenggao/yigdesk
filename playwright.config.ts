@@ -11,8 +11,17 @@ export default defineConfig({
   webServer: externalBaseURL
     ? undefined
     : {
-        command: `python -m yigdesk.app`,
-        env: { ...process.env, PORT: port, YIGDESK_RUNTIME: 'runtime/e2e' },
+        // Build the on-demand scenario workbook first, then serve the board. Without
+        // YIGDESK_SCENARIO/LEDGER the board routes answer 503; these defaults mirror
+        // the spec's fallbacks so a direct `playwright test` seeds the same ledger.
+        command: `python scripts/build_scenarios.py && python -m yigdesk.app`,
+        env: {
+          ...process.env,
+          PORT: port,
+          YIGDESK_RUNTIME: 'runtime/e2e',
+          YIGDESK_SCENARIO: process.env.YIGDESK_SCENARIO || 'data/scenarios/council_discount',
+          YIGDESK_LEDGER: process.env.YIGDESK_LEDGER || 'runtime/e2e-board.jsonl'
+        },
         url: `http://127.0.0.1:${port}/api/health`,
         reuseExistingServer: false,
         timeout: 30_000

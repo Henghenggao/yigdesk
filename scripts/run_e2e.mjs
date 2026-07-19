@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 import process from 'node:process';
 
 const require = createRequire(import.meta.url);
@@ -10,6 +11,11 @@ const externalBaseURL = process.env.YIGDESK_BASE_URL;
 const port = process.env.YIGDESK_E2E_PORT || '8791';
 const baseURL = externalBaseURL || `http://127.0.0.1:${port}`;
 const runtime = process.env.YIGDESK_RUNTIME || 'runtime/e2e';
+// The board surface reads YIGDESK_SCENARIO + YIGDESK_LEDGER fresh on every request.
+// Configure them once here (for the launched app) and forward them to the spec, which
+// re-seeds the shared ledger via scripts/seed_board.py between cases.
+const scenario = process.env.YIGDESK_SCENARIO || path.resolve(process.cwd(), 'data/scenarios/council_discount');
+const ledger = process.env.YIGDESK_LEDGER || path.resolve(process.cwd(), 'runtime/e2e-board.jsonl');
 let serverProcess;
 let testProcess;
 let shuttingDown = false;
@@ -73,9 +79,11 @@ process.once('SIGTERM', () => void shutdown('SIGTERM'));
 let exitCode = 1;
 try {
   const python = process.env.YIGDESK_PYTHON || 'python';
-  const generatedSample = runProcess(
+  // The council_discount workbook is generated on demand (gitignored), so build the
+  // scenarios before the app comes up or /api/board would answer 503 (no workbook).
+  const builtScenarios = runProcess(
     python,
-    ['-m', 'scripts.generate_sample_workbook', '--output', 'runtime/e2e-upload-sample.xlsx'],
+    ['scripts/build_scenarios.py'],
     {
       cwd: process.cwd(),
       env: process.env,
@@ -84,8 +92,8 @@ try {
       windowsHide: true,
     },
   );
-  if (await generatedSample.completed !== 0) {
-    throw new Error('Could not generate the synthetic E2E upload workbook.');
+  if (await builtScenarios.completed !== 0) {
+    throw new Error('Could not build the demo scenario workbooks for the board E2E.');
   }
   if (!externalBaseURL) {
     const launched = runProcess(python, ['-m', 'yigdesk.app'], {
@@ -95,6 +103,8 @@ try {
         HOST: '127.0.0.1',
         PORT: port,
         YIGDESK_RUNTIME: runtime,
+        YIGDESK_SCENARIO: scenario,
+        YIGDESK_LEDGER: ledger,
       },
       shell: false,
       stdio: ['ignore', 'inherit', 'inherit'],
@@ -113,6 +123,8 @@ try {
         ...process.env,
         YIGDESK_BASE_URL: baseURL,
         YIGDESK_RUNTIME: runtime,
+        YIGDESK_SCENARIO: scenario,
+        YIGDESK_LEDGER: ledger,
       },
       shell: false,
       stdio: 'inherit',

@@ -1,335 +1,123 @@
-import { expect, test } from '@playwright/test';
+import { test, expect } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
-test.beforeEach(async ({ request }) => {
-  const reset = await request.post('/api/reset', { data: { scenario_id: 'ready' } });
-  expect(reset.ok()).toBe(true);
-});
+// The board web surface renders a deterministic ledger projection and lets a
+// human drive the two gate ops. The agent/MCP side normally seeds the ledger;
+// here `scripts/seed_board.py` plays that role against the SAME shared ledger the
+// app reads (YIGDESK_SCENARIO + YIGDESK_LEDGER, resolved fresh on every request),
+// so re-seeding between specs deterministically swaps the board state.
+//
+// The harness (scripts/run_e2e.mjs) launches the app once with these env vars and
+// forwards them to this process; the defaults keep a direct `playwright test`
+// (webServer path) working too. Playwright runs single-worker (playwright.config
+// workers:1) and this file is serial, so the shared ledger is never contended.
 
-test('complete evidence renders a five-cell read-only consequence packet', async ({ page }) => {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: /see the consequence/i })).toBeVisible();
-  await expect(page.getByRole('button', { name: /complete evidence/i })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('#packet-export')).toBeHidden();
-  await expect(page.locator('yig-grid')).toHaveAttribute('data-yig-state', 'ready');
-  await expect(page.getByTestId('analyze')).toHaveAccessibleName(/preview consequence locally/i);
-  await expect(page.locator('#read-wall')).toContainText('Codex Work calls Yigdesk MCP directly');
+const ROOT = process.cwd();
+const PYTHON = process.env.YIGDESK_PYTHON || 'python';
+const SCENARIO = process.env.YIGDESK_SCENARIO || path.resolve(ROOT, 'data/scenarios/council_discount');
+const LEDGER = process.env.YIGDESK_LEDGER || path.resolve(ROOT, 'runtime/e2e-board.jsonl');
 
-  await page.getByTestId('analyze').click();
+type SeedMode = 'single' | 'multi' | 'empty';
 
-  await expect(page.getByTestId('verdict')).toHaveText('READY FOR CFO');
-  await expect(page.locator('#net-arr')).toHaveText('$880k');
-  await expect(page.locator('#byte-proof')).toHaveText('Workbook bytes unchanged');
-  await expect(page.locator('#packet-status')).toHaveText('5 CELLS · COMPLETE');
-  await expect(page.locator('yig-grid tr.is-affected')).toHaveCount(5);
-  await expect(page.locator('yig-grid')).toContainText('$900k');
-  await expect(page.locator('yig-grid')).toContainText('$880k');
-  await expect(page.locator('#packet-export')).toBeVisible();
-  await expect(page.locator('body')).toHaveAttribute('data-outcome', 'ready');
-  await expect(page.locator('#packet-heading')).toHaveText('ConsequencePacket prepared.');
-  await expect(page.locator('#memo-status')).toHaveText('DRAFT · NOT SENT');
-  await expect(page.getByTestId('analyze')).toHaveAttribute('data-state', 'idle');
+function seedBoard(mode: SeedMode): void {
+  const args = ['-m', 'scripts.seed_board', '--scenario', SCENARIO, '--ledger', LEDGER];
+  if (mode === 'multi') args.push('--multi');
+  if (mode === 'empty') args.push('--empty');
+  execFileSync(PYTHON, args, { cwd: ROOT, stdio: 'inherit' });
+}
 
-  await page.locator('yig-grid tr[data-address="Deal Model!B4"]').click();
-  await expect(page.locator('yig-grid tr[data-address="Deal Model!B4"]')).toHaveAttribute('aria-selected', 'true');
-  await expect(page.locator('yig-grid tr.is-selected')).toHaveCount(1);
-  await expect(page.locator('yig-model-inspector')).toContainText('Gross profit ÷ Net ARR');
-  await expect(page.getByRole('button', { name: /approve/i })).toHaveCount(0);
-});
+test.describe.configure({ mode: 'serial' });
 
-test('mobile layout keeps the proof workflow usable without horizontal overflow', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+test('single decision auto-selects, prices its candidate, and drives the policy gate to a committed record', async ({ page }) => {
+  seedBoard('single');
   await page.goto('/');
 
-  await page.keyboard.press('Tab');
-  await expect(page.locator('.skip-link')).toBeFocused();
-  await page.getByRole('button', { name: /complete evidence/i }).click();
-  await page.getByTestId('analyze').click();
+  // Exactly one decision auto-selects: the decision view renders directly with no chooser.
+  await expect(page.getByTestId('board-root')).toBeVisible();
+  await expect(page.getByTestId('decision-chooser')).toHaveCount(0);
+  const view = page.getByTestId('decision-view');
+  await expect(view).toBeVisible();
+  await expect(view).toHaveAttribute('data-decision-id', 'd1');
+  await expect(view).toContainText('Approve the discount?'); // question
+  await expect(view).toContainText('council_discount');      // decision_type
+  await expect(view).toContainText('open');                  // status
 
-  await expect(page.getByTestId('verdict')).toHaveText('READY FOR CFO');
-  await expect(page.locator('#packet-export')).toBeVisible();
-  const viewport = await page.evaluate(() => ({
-    clientWidth: document.documentElement.clientWidth,
-    scrollWidth: document.documentElement.scrollWidth,
-  }));
-  expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth);
-});
+  // The priced candidate carries the deterministic verdict, figures, and evidence refs.
+  const candidate = page.locator('[data-testid="candidate"][data-candidate-id="c1"]');
+  await expect(candidate).toBeVisible();
+  await expect(candidate).toHaveAttribute('data-verdict', 'ok');
+  await expect(candidate).toContainText('Net ARR');
+  await expect(candidate).toContainText('980.00');            // net_arr after discount=2
+  await expect(candidate).toContainText('Deal Inputs!B4');    // grounded evidence ref
 
-test('uploaded synthetic FY2024 workbook drives a real parsed decision board', async ({ page }) => {
-  await page.goto('/');
-  const sample = path.resolve('runtime/e2e-upload-sample.xlsx');
+  // The grounded risk claim is surfaced.
+  const claim = page.getByTestId('claim');
+  await expect(claim).toBeVisible();
+  await expect(claim).toContainText('risk');
+  await expect(claim).toContainText('cogs may rise');
 
-  await page.locator('#workbook-upload').setInputFiles(sample);
-  await expect(page.locator('#upload-file-label')).toHaveText('e2e-upload-sample.xlsx');
-  await page.locator('#requested-discount').fill('2.00');
-  await page.locator('#margin-floor').fill('30.00');
-  await page.locator('#upload-action').click();
+  // max:<metric> is decision-scoped: a policy winner + a single authorize control,
+  // and NO candidate-scoped approves (that is the human_selected shape).
+  await expect(page.getByTestId('gate-panel')).toBeVisible();
+  await expect(page.getByTestId('policy-winner')).toContainText('c1');
+  await expect(page.getByTestId('authorize-policy')).toBeVisible();
+  await expect(page.getByTestId('approve-candidate')).toHaveCount(0);
 
-  await expect(page.locator('#upload-status')).toContainText('48 FY2024 source cells');
-  await expect(page.locator('#source-pill')).toHaveText('UPLOADED · SYNTHETIC');
-  await expect(page.locator('#attachment-name')).toHaveText('e2e-upload-sample.xlsx');
-  await expect(page.locator('#fingerprint')).toContainText('source sha256');
-  await expect(page.getByRole('button', { name: /complete evidence/i })).toHaveAttribute('aria-pressed', 'false');
-
-  await page.getByTestId('analyze').click();
-
-  await expect(page.getByTestId('verdict')).toHaveText('READY FOR CFO');
-  await expect(page.locator('#net-arr')).toHaveText('$14,365k');
-  await expect(page.locator('#gross-margin')).toHaveText('30.2%');
-  await expect(page.locator('#a2a-state')).toHaveText('A2A READY');
-  await expect(page.locator('#board-requested')).toHaveText('2.0%');
-  await expect(page.locator('#board-boundary')).toHaveText('2.23%');
-  await expect(page.locator('#board-rounding')).toHaveText('2.24%');
-  await expect(page.locator('#board-rounding-note')).toContainText('30.0% displayed');
-  await expect(page.locator('#board-rounding-note')).toContainText('FAIL');
-  await expect(page.locator('#board-stress')).toHaveText('26.7%');
-  await expect(page.locator('#copy-council')).toBeEnabled();
-  await expect(page.locator('#byte-proof')).toHaveText('Workbook bytes unchanged');
-});
-
-test('Codex Work council progress is rendered from the revision audit', async ({ page }) => {
-  const pendingRoles = {
-    finance_analyst: { state: 'running', completed: 2, expected: 4, tools: ['get_deal_context', 'find_feasible_boundary'] },
-    sales_advocate: { state: 'pending', completed: 0, expected: 3, tools: [] },
-    risk_challenger: { state: 'pending', completed: 0, expected: 5, tools: [] },
-    decision_optimizer: { state: 'pending', completed: 0, expected: 3, tools: [] },
-  };
-  const completeRoles = Object.fromEntries(
-    Object.entries(pendingRoles).map(([actor, role]) => [
-      actor,
-      { ...role, state: 'complete', completed: role.expected },
-    ]),
+  // Act as cfo and authorize the policy selection (decision-scoped approve).
+  await page.getByTestId('role-select').selectOption('cfo');
+  const approvalCommitted = page.waitForResponse(
+    (r) => r.url().includes('/api/board/op') && r.request().method() === 'POST',
   );
-  let polls = 0;
-  await page.route('**/api/council-status', async (route) => {
-    polls += 1;
-    if (polls === 1) {
-      await route.fulfill({
-        json: {
-          mode: 'codex-work',
-          status: 'running',
-          verified: false,
-          observed_call_count: 2,
-          accepted_progress_count: 2,
-          expected_call_count: 15,
-          roles: pendingRoles,
-        },
-      });
-      return;
-    }
-    await route.fulfill({
-      json: {
-        mode: 'codex-work',
-        status: 'verified',
-        verified: true,
-        observed_call_count: 15,
-        accepted_progress_count: 15,
-        expected_call_count: 15,
-        roles: completeRoles,
-      },
-    });
-  });
+  await page.getByTestId('authorize-policy').click();
+  await approvalCommitted; // ensure the approval is on the ledger before resolving
 
-  await page.goto('/');
+  // Resolve → deterministic committed record (policy picks max headroom = c1).
+  await page.getByTestId('resolve').click();
+  const outcome = page.getByTestId('resolve-outcome');
+  await expect(outcome).toBeVisible();
+  await expect(outcome).toContainText('c1');     // chosen_candidate_id
+  await expect(outcome).toContainText('policy'); // closed_by
 
-  await expect(page.locator('#a2a-state')).toHaveText('COUNCIL 2/15');
-  await expect(page.locator('[data-council-actor="finance_analyst"]')).toContainText('2/4');
-  await expect(page.locator('[data-council-actor="decision_optimizer"]')).toContainText('0/3');
-  await expect(page.locator('#a2a-state')).toHaveText('A2A VERIFIED');
-  await expect(page.locator('[data-council-actor="decision_optimizer"]')).toHaveAttribute('data-state', 'complete');
+  // After a committed resolution the gate controls carry disabled...
+  await expect(page.getByTestId('resolve')).toBeDisabled();
+  await expect(page.getByTestId('authorize-policy')).toBeDisabled();
+
+  // ...and resolving again is idempotent: the SAME record still renders.
+  await page.getByTestId('resolve').click({ force: true });
+  await expect(outcome).toContainText('c1');
+  await expect(outcome).toContainText('policy');
+  await expect(page.getByTestId('resolve')).toBeDisabled();
 });
 
-test('missing evidence produces an honest partial packet without an action control', async ({ page }) => {
+test('multiple decisions require an explicit chooser selection before the gate appears', async ({ page }) => {
+  seedBoard('multi');
   await page.goto('/');
-  await page.getByRole('button', { name: 'Missing cost evidence' }).click();
-  await page.getByTestId('analyze').click();
 
-  await expect(page.getByTestId('verdict')).toHaveText('HOLD');
-  await expect(page.locator('#gross-margin')).toHaveText('Unavailable');
-  await expect(page.locator('#headroom')).toHaveText('Floor check unavailable');
-  await expect(page.locator('#packet-status')).toHaveText('5 CELLS · PARTIAL');
-  await expect(page.locator('#memo-status')).toHaveText('NOT PREPARED');
-  await expect(page.locator('body')).toHaveAttribute('data-outcome', 'hold');
-  await expect(page.locator('#packet-heading')).toHaveText('Hold packet prepared.');
-  await expect(page.getByRole('button', { name: /approve/i })).toHaveCount(0);
+  // A chooser is offered and nothing is auto-selected.
+  await expect(page.getByTestId('decision-chooser')).toBeVisible();
+  await expect(page.getByTestId('decision-option')).toHaveCount(2);
+
+  // Until a decision is chosen there is no decision view and no gate actions.
+  await expect(page.getByTestId('decision-view')).toHaveCount(0);
+  await expect(page.getByTestId('gate-panel')).toHaveCount(0);
+  await expect(page.getByTestId('resolve')).toHaveCount(0);
+  await expect(page.getByTestId('authorize-policy')).toHaveCount(0);
+
+  // Choosing a decision reveals its view and gate.
+  await page.locator('[data-testid="decision-option"][data-decision-id="d2"]').click();
+  const view = page.getByTestId('decision-view');
+  await expect(view).toBeVisible();
+  await expect(view).toHaveAttribute('data-decision-id', 'd2');
+  await expect(view).toContainText('Approve the pilot expansion?');
+  await expect(page.getByTestId('gate-panel')).toBeVisible();
 });
 
-test('real Codex mode exposes a verified MCP run instead of a local fallback', async ({ page }) => {
-  test.skip(process.env.YIGDESK_REAL_CODEX !== '1', 'requires an authenticated Codex runtime');
-  test.setTimeout(125_000);
+test('an empty ledger renders the empty-board state', async ({ page }) => {
+  seedBoard('empty');
   await page.goto('/');
 
-  await expect(page.getByTestId('analyze')).toHaveAccessibleName(/analyze with nested codex/i);
-  await page.getByTestId('analyze').click();
-
-  await expect(page.getByTestId('verdict')).toHaveText('READY FOR CFO', { timeout: 120_000 });
-  await expect(page.locator('#agent-proof')).toBeVisible();
-  await expect(page.locator('#agent-mode')).toContainText('gpt-5.6-sol');
-  await expect(page.locator('#agent-meta')).toContainText('3 tools');
-  await expect(page.locator('#agent-meta')).toContainText('arun-');
-  await expect(page.locator('#agent-verified')).toHaveText('ENGINE MATCH VERIFIED');
-});
-
-test('browser sends the run token and renders truthful Codex phases', async ({ page, request }) => {
-  const preview = await request.post('/api/analyze');
-  expect(preview.ok()).toBe(true);
-  const { packet } = await preview.json();
-  const requestToken = 'browser-only-request-token';
-
-  await page.route('**/api/state', async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    body.agent = {
-      available: true,
-      mode: 'codex-mcp',
-      model: 'gpt-5.6-sol',
-      reasoning_effort: 'low',
-      request_token: requestToken,
-    };
-    await route.fulfill({ response, json: body });
-  });
-
-  await page.route('**/api/agent-runs', async (route) => {
-    expect(route.request().method()).toBe('POST');
-    expect(route.request().headers()['x-yigdesk-agent-token']).toBe(requestToken);
-    await route.fulfill({
-      status: 202,
-      json: { run_id: 'arun-phases', status: 'queued', stage: 'starting_codex' },
-    });
-  });
-
-  let poll = 0;
-  await page.route('**/api/agent-runs/arun-phases', async (route) => {
-    poll += 1;
-    if (poll === 1) {
-      await route.fulfill({
-        json: { run_id: 'arun-phases', status: 'running', stage: 'calling_yigdesk_tools' },
-      });
-      return;
-    }
-    if (poll === 2) {
-      await route.fulfill({
-        json: { run_id: 'arun-phases', status: 'running', stage: 'verifying_result' },
-      });
-      return;
-    }
-    await route.fulfill({
-      json: {
-        run_id: 'arun-phases',
-        status: 'completed',
-        stage: 'review_ready',
-        packet,
-        agent: {
-          model: 'gpt-5.6-sol',
-          tool_calls: ['get_deal_context', 'preview_consequence', 'inspect_evidence'],
-          latency_ms: 25,
-          usage: { input_tokens: 10, output_tokens: 5 },
-          verified: true,
-        },
-      },
-    });
-  });
-
-  await page.goto('/');
-  await page.getByTestId('analyze').click();
-  await expect(page.getByTestId('analyze')).toContainText('Codex · starting…');
-  await expect(page.getByTestId('analyze')).toContainText('Codex · calling Yigdesk tools…');
-  await expect(page.getByTestId('analyze')).toContainText('Codex · verifying result…');
-  await expect(page.getByTestId('verdict')).toHaveText('READY FOR CFO');
-});
-
-test('a failed retry revokes stale proof immediately and a later success recovers', async ({ page, request }) => {
-  const preview = await request.post('/api/analyze');
-  expect(preview.ok()).toBe(true);
-  const { packet } = await preview.json();
-
-  await page.route('**/api/state', async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    body.agent = { available: true, mode: 'codex', model: 'gpt-5.6-sol' };
-    await route.fulfill({ response, json: body });
-  });
-  await page.route('**/api/reset', async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    body.agent = { available: true, mode: 'codex', model: 'gpt-5.6-sol' };
-    await route.fulfill({ response, json: body });
-  });
-
-  let attempt = 0;
-  let releaseFailure!: () => void;
-  let signalFailureRequest!: () => void;
-  const failureGate = new Promise<void>((resolve) => { releaseFailure = resolve; });
-  const failureRequested = new Promise<void>((resolve) => { signalFailureRequest = resolve; });
-  const agent = {
-    model: 'gpt-5.6-sol',
-    tool_calls: ['get_deal_context', 'preview_consequence', 'inspect_evidence'],
-    latency_ms: 1234,
-    usage: { input_tokens: 100, output_tokens: 20 },
-    verified: true,
-  };
-
-  await page.route('**/api/agent-runs', async (route) => {
-    if (route.request().method() !== 'POST') {
-      await route.fallback();
-      return;
-    }
-    attempt += 1;
-    if (attempt === 2) {
-      signalFailureRequest();
-      await failureGate;
-      await route.fulfill({
-        status: 200,
-        json: {
-          run_id: 'arun-failed-retry',
-          status: 'failed',
-          error: { message: 'The agent output did not match the engine packet.' },
-        },
-      });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      json: {
-        run_id: attempt === 1 ? 'arun-first-success' : 'arun-recovered-success',
-        status: 'completed',
-        packet,
-        agent,
-      },
-    });
-  });
-
-  await page.goto('/');
-  await page.getByTestId('analyze').click();
-  await expect(page.locator('#agent-proof')).toBeVisible();
-  await expect(page.locator('#agent-verified')).toHaveText('ENGINE MATCH VERIFIED');
-  await expect(page.locator('#packet-export')).toBeVisible();
-  await expect(page.locator('#copy-packet')).toBeEnabled();
-
-  await page.getByTestId('analyze').click();
-  await failureRequested;
-  await expect(page.locator('#agent-proof')).toBeHidden();
-  await expect(page.locator('#packet-export')).toBeHidden();
-  await expect(page.locator('#copy-packet')).toBeDisabled();
-  await expect(page.locator('#packet-id')).toHaveText('cpkt-pending');
-
-  releaseFailure();
-  await expect(page.getByTestId('verdict')).toHaveText('AGENT REJECTED');
-  await expect(page.locator('#decision-empty')).toContainText('Analysis could not be verified');
-  await expect(page.locator('#decision-empty')).toContainText('No proof packet is available');
-  await expect(page.locator('#agent-proof')).toBeHidden();
-  await expect(page.locator('#packet-export')).toBeHidden();
-
-  await page.getByRole('button', { name: /complete evidence/i }).click();
-  await expect(page.getByTestId('verdict')).toHaveText('NOT ANALYZED');
-  await expect(page.locator('#decision-empty')).toContainText('Nothing inferred yet');
-  await expect(page.locator('#packet-status')).toHaveText('PREVIEW ONLY');
-  await expect(page.getByTestId('analyze')).toHaveAccessibleName(/analyze with nested codex/i);
-
-  await page.getByTestId('analyze').click();
-  await expect(page.getByTestId('verdict')).toHaveText('READY FOR CFO');
-  await expect(page.locator('#agent-proof')).toBeVisible();
-  await expect(page.locator('#agent-meta')).toContainText('arun-recovered-success');
-  await expect(page.locator('#packet-export')).toBeVisible();
-  await expect(page.locator('#copy-packet')).toBeEnabled();
+  await expect(page.getByTestId('board-empty')).toBeVisible();
+  await expect(page.getByTestId('decision-view')).toHaveCount(0);
+  await expect(page.getByTestId('decision-chooser')).toHaveCount(0);
 });
