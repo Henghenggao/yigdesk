@@ -1,0 +1,10 @@
+{
+  "workbook": "margin.xlsx",
+  "input_refs": {"mrr":"Plan!B2","expansion_pct":"Plan!B3","infra_cost":"Plan!B4","target_margin":"Plan!B5"},
+  "metrics": [
+    {"id":"new_mrr","label":"New MRR","formula":"mrr * (1 + expansion_pct/100)","unit":"$k"},
+    {"id":"gross_margin","label":"Gross margin","formula":"(new_mrr - infra_cost) / new_mrr * 100","requires":["infra_cost"],"unit":"%"},
+    {"id":"headroom","label":"Headroom","formula":"gross_margin - target_margin","requires":["infra_cost"],"unit":"pt"}
+  ],
+  "constraints": [{"metric":"headroom","op":">=","value":0}]
+}

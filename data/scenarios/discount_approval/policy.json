@@ -1,0 +1,1 @@
+{"decision_type":"discount","required_approvals":[{"role":"cfo","verdict":"approve"}],"candidate_selector":"max:headroom"}
