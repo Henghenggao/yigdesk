@@ -24,4 +24,4 @@ args = ["-m", "yigdesk.mcp_server"]
 required = true
 startup_timeout_sec = 15
 tool_timeout_sec = 30
-env = { YIGDESK_URL = "http://127.0.0.1:8787", YIGDESK_AUDIT_FILE = "runtime/codex-a2a-audit.jsonl" }
+env = { YIGDESK_URL = "http://127.0.0.1:8787", YIGDESK_RUNTIME = "runtime" }

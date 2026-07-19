@@ -13,22 +13,25 @@ is an honest <code>HOLD</code>.
 
 ## The 2-minute demo
 
-1. Choose `01b_financial_data_clean.xlsx` from the synthetic lift packet, keep
-   requested discount at **2.00%** and margin floor at **30.00%**, then select
-   **Parse + bind revision**.
-2. Show the actual filename, byte size, source-cell count, SHA-256 fingerprint,
-   FY2024 revenue and COGS extracted from `P&L Report`, and the unchanged-source proof.
-3. Select **Analyze with Codex** (or the truthfully labeled local preview). See
+1. Open this repository in Codex, attach `01b_financial_data_clean.xlsx`, and ask
+   `$yigdesk-council` to evaluate a **2.00%** request against a **30.00%** floor.
+2. Codex binds the real file to an immutable session and reports filename, byte size,
+   source-cell count, SHA-256 fingerprint, extracted FY2024 revenue and COGS, and the
+   unchanged-source proof—without asking the user to switch to a terminal.
+3. The same task runs the real specialist council. Its deterministic base analysis is
    <code>READY FOR CFO</code>, net ARR <code>$14,365k</code>, ARR impact
    <code>-$293k</code>, gross margin <code>30.2%</code>, and <code>0.2%</code> headroom.
-4. Show the A2A board: requested **2.00%** passes, the exact ceiling is
+4. Show the returned decision brief: requested **2.00%** passes, the exact ceiling is
    **2.239020%**, **2.23%** is the largest safe 0.01-point proposal, and **2.24%**
    displays **30.0%** while failing the exact constraint.
-5. Copy the council prompt into Codex. Finance, sales, and risk subagents call the
-   same Yigdesk MCP revision; `decision_optimizer` rejects revision drift and
-   separates financial feasibility from commercial optimality.
-6. Switch to **Missing cost evidence** and show terminal <code>HOLD</code>. No
+5. Show the verified 15-call audit. Finance, sales, and risk called the same Yigdesk
+   revision; `decision_optimizer` ran only after the revision gate passed.
+6. Ask Codex to open <http://127.0.0.1:8787> only if a visual evidence view is useful,
+   then show terminal <code>HOLD</code> with missing cost evidence. No
    approval, send, messaging, or business write-back endpoint exists.
+
+See the [natural-language demo guide](docs/NATURAL_LANGUAGE_DEMO.md) for the exact
+one-request script and follow-ups.
 
 The bundled scenario is synthetic. The fixed adapter evaluates:
 
@@ -84,6 +87,7 @@ the deterministic packet. There is no silent fallback.
 CLI:
 
 ~~~bash
+python -m yigdesk.cli bind --file runtime/northwind-fy2024-synthetic.xlsx --discount 2 --floor 30
 python -m yigdesk.cli state
 python -m yigdesk.cli analyze
 python -m yigdesk.cli inspect "Deal Model!B4"
@@ -98,24 +102,15 @@ python -m yigdesk.mcp_server
 
 ## Real Codex A2A council
 
-Start Yigdesk locally, then open this repository in a new Codex task. Project
-configuration in `.codex/config.toml` connects the local Yigdesk MCP server, and
-`.codex/agents/` defines four read-only roles. Ask:
+Open this repository in a new Codex task and attach or reference the generated
+synthetic workbook. Project configuration connects the local Yigdesk MCP server,
+`.codex/agents/` defines four read-only roles, and the project Skill owns intake,
+service readiness, orchestration, and verification. Ask:
 
 ~~~text
-Use the project Yigdesk decision council for the current Northwind request.
-Spawn finance_analyst, sales_advocate, and risk_challenger in parallel. On every
-call pass the matching actor. Finance must make exactly: get_deal_context,
-find_feasible_boundary(0.01), evaluate_proposal(submitted), inspect_evidence
-(Deal Model!B4). Sales must make exactly: get_deal_context,
-evaluate_proposal(submitted), evaluate_proposal(one alternative). Risk must make
-exactly: get_deal_context, list_missing_evidence, find_feasible_boundary(0.01),
-stress_test_assumption(submitted,+5% COGS), inspect_evidence(Deal Model!B4).
-Require matching revision_id, source_fingerprint, and packet_id, then spawn
-decision_optimizer for exactly: get_deal_context, compare_proposals(unique role
-proposals), inspect_evidence(Deal Model!B4). No other Yigdesk calls. Distinguish
-financial feasibility from commercial optimality; do not invent market evidence
-and do not approve, send, or write back.
+使用 $yigdesk-council 分析我附上的 Northwind FY2024 合成 Excel。
+当前折扣 0%，客户申请 2%，毛利率底线 30%。
+让 finance、sales、risk 真实调用 Yigdesk 相互 challenge，最后给我审计通过的建议。
 ~~~
 
 This is a real Codex subagent workflow. Yigdesk does not draw fake agent chat in
@@ -124,8 +119,8 @@ context, consequence, evidence inspection, proposal evaluation, proposal
 comparison, exact boundary, explicit COGS stress test, and missing-evidence
 listing. See [A2A decision protocol](docs/A2A_DECISION_PROTOCOL.md).
 
-Every council role passes an allowlisted actor on each call. Yigdesk records an
-ignored, ephemeral audit under `runtime/`; the actor is audit attribution, not
+Every council role passes an allowlisted actor on each call. Yigdesk records a
+session-specific, ignored audit under `runtime/sessions/`; the actor is audit attribution, not
 an authentication credential. Independently verify the latest run:
 
 ~~~bash

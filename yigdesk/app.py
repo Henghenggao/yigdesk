@@ -34,6 +34,7 @@ from .importer import (
     import_synthetic_workbook,
     parse_decimal_field,
 )
+from .session import BoundSession, live_revision_id, load_active_session
 from .workbook import create_workbook, fingerprint, inspect_cell, read_inputs, workbook_snapshot
 
 
@@ -57,18 +58,32 @@ class DemoState:
     lock: threading.RLock = field(default_factory=threading.RLock)
     current_scenario: dict[str, Any] = field(init=False)
     active_source_path: Path = field(init=False)
+    active_workbook_path: Path = field(init=False)
+    bound_session_id: str | None = field(init=False, default=None)
+    observed_session_id: str | None = field(init=False, default=None)
     source: dict[str, Any] = field(init=False)
 
     @property
     def workbook_path(self) -> Path:
-        return self.runtime_dir / "yigdesk-demo.xlsx"
+        return self.active_workbook_path
+
+    def load_bound_session(self, bound: BoundSession) -> None:
+        self.scenario_id = bound.manifest["scenario_id"]
+        self.current_scenario = deepcopy(bound.manifest["scenario"])
+        self.active_source_path = bound.source_path
+        self.active_workbook_path = bound.projection_path
+        self.source = deepcopy(bound.manifest["source"])
+        self.bound_session_id = bound.session_id
+        self.observed_session_id = bound.session_id
 
     def reset_fixture(self, scenario_id: str = "ready") -> None:
         if scenario_id not in self.scenarios:
             raise ValueError("unknown scenario")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        create_workbook(self.workbook_path, self.scenarios[scenario_id])
+        self.active_workbook_path = self.runtime_dir / "yigdesk-demo.xlsx"
+        create_workbook(self.active_workbook_path, self.scenarios[scenario_id])
         self.scenario_id = scenario_id
+        self.bound_session_id = None
         self.current_scenario = deepcopy(self.scenarios[scenario_id])
         self.active_source_path = self.workbook_path
         self.source = {
@@ -116,18 +131,13 @@ class DemoState:
         except Exception:
             candidate.unlink(missing_ok=True)
             raise
-        previous_source = getattr(self, "active_source_path", None)
-        previous_projection = self.workbook_path if self.workbook_path.exists() else None
-        candidate.replace(self.runtime_dir / "uploaded-source.xlsx")
-        projection.replace(self.workbook_path)
-        if previous_source and previous_source not in {
-            self.workbook_path,
-            self.runtime_dir / "uploaded-source.xlsx",
-        }:
-            previous_source.unlink(missing_ok=True)
-        if previous_projection and previous_projection != self.workbook_path:
-            previous_projection.unlink(missing_ok=True)
-        self.active_source_path = self.runtime_dir / "uploaded-source.xlsx"
+        upload_source = self.runtime_dir / "uploaded-source.xlsx"
+        upload_projection = self.runtime_dir / "yigdesk-demo.xlsx"
+        candidate.replace(upload_source)
+        projection.replace(upload_projection)
+        self.active_source_path = upload_source
+        self.active_workbook_path = upload_projection
+        self.bound_session_id = None
         self.current_scenario = imported.scenario
         self.source = {**imported.source, "sha256": fingerprint(self.active_source_path)}
         self.scenario_id = "upload-" + self.source["sha256"][:12]
@@ -265,7 +275,10 @@ def create_app(
         Path(runtime_dir or os.environ.get("YIGDESK_RUNTIME", DEFAULT_RUNTIME)),
         scenarios=scenarios or _load_scenarios(),
     )
-    state.reset_fixture("ready")
+    try:
+        state.load_bound_session(load_active_session(state.runtime_dir))
+    except FileNotFoundError:
+        state.reset_fixture("ready")
     requested_agent = (
         agent_enabled
         if agent_enabled is not None
@@ -289,6 +302,17 @@ def create_app(
     app.config["YIGDESK_STATE"] = state
     app.config["YIGDESK_AGENT"] = agent
     app.config["YIGDESK_AGENT_RUNS"] = agent_runs
+
+    @app.before_request
+    def refresh_bound_session():
+        try:
+            bound = load_active_session(state.runtime_dir)
+        except FileNotFoundError:
+            return None
+        if bound.session_id != state.observed_session_id:
+            with state.lock:
+                state.load_bound_session(bound)
+        return None
 
     @app.after_request
     def security_headers(response):
@@ -323,7 +347,7 @@ def create_app(
 
     @app.get("/api/state")
     def get_state():
-        snapshot = _requested_snapshot(agent_runs)
+        snapshot = _requested_snapshot(agent_runs, state)
         if snapshot is not None:
             packet = snapshot.packet()
             return jsonify(
@@ -413,7 +437,7 @@ def create_app(
     def inspect():
         address = str(request.args.get("address", ""))
         try:
-            snapshot = _requested_snapshot(agent_runs)
+            snapshot = _requested_snapshot(agent_runs, state)
             if snapshot is not None:
                 packet = snapshot.packet()
                 cell = next(
@@ -443,7 +467,7 @@ def create_app(
 
     @app.post("/api/analyze")
     def analyze():
-        snapshot = _requested_snapshot(agent_runs)
+        snapshot = _requested_snapshot(agent_runs, state)
         if snapshot is not None:
             return jsonify({"packet": snapshot.packet()})
         with state.lock:
@@ -699,7 +723,7 @@ def _consequence_packet_for_paths(
     return {
         "packet_id": packet_id,
         **packet_core,
-        "revision_id": "live-" + before[:24],
+        "revision_id": live_revision_id(before, projection_before),
         "analysis_bytes_unchanged": (
             before == after and projection_before == projection_after
         ),
@@ -758,16 +782,22 @@ def _revision_fields(packet: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _requested_snapshot(store: AgentRunStore) -> AgentSnapshot | None:
+def _requested_snapshot(
+    store: AgentRunStore, state: DemoState | None = None
+) -> AgentSnapshot | None:
     revision_id = request.headers.get("X-Yigdesk-Revision")
     if not revision_id:
         return None
     snapshot = store.get_snapshot(revision_id)
-    if snapshot is None:
-        from flask import abort
+    if snapshot is not None:
+        return snapshot
+    if state is not None:
+        with state.lock:
+            if _consequence_packet(state)["revision_id"] == revision_id:
+                return None
+    from flask import abort
 
-        abort(404, description="Unknown or expired agent revision.")
-    return snapshot
+    abort(404, description="Unknown, expired, or inactive agent revision.")
 
 
 def _json_object() -> dict[str, Any]:
@@ -791,7 +821,7 @@ def _deal_inputs_from_scenario(scenario: dict[str, Any]) -> DealInputs:
 def _decision_inputs(
     state: DemoState, store: AgentRunStore
 ) -> tuple[DealInputs, dict[str, str]]:
-    snapshot = _requested_snapshot(store)
+    snapshot = _requested_snapshot(store, state)
     if snapshot is not None:
         packet = snapshot.packet()
         return _deal_inputs_from_scenario(snapshot.scenario()), _revision_fields(packet)
@@ -876,6 +906,15 @@ def _state_payload(state: DemoState, agent: dict[str, Any] | None = None) -> dic
             "list_missing_evidence",
         ],
         "revision": _revision_fields(packet),
+        "session": (
+            None
+            if state.bound_session_id is None
+            else {
+                "protocol_version": "yigdesk-session/v1",
+                "session_id": state.bound_session_id,
+                "revision_id": packet["revision_id"],
+            }
+        ),
         "agent": agent
         or {
             "available": False,
