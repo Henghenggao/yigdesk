@@ -117,19 +117,21 @@ python -m yigdesk.app
 
 ## Benchmark: bare agent vs. blackboard
 
-`compare_agents` runs the same model twice on one private case — once bare, once
-grounded through the blackboard's priced candidate — and reports accuracy,
-determinism, latency, and an observability score. It prices the `benchmark`
-scenario deterministically as the independent reference. Both arms send the case
-to the model, so the acknowledgement flag is mandatory:
+`compare_agents` runs the same model twice on one case — once bare, once grounded
+through the blackboard's priced candidate — and reports accuracy, determinism,
+latency, and an observability score. It prices the `benchmark` scenario
+deterministically as the independent reference. Both arms send the case to the
+model, so the acknowledgement flag is mandatory:
 
 ```bash
-python -m scripts.compare_agents --case benchmarks/private/case.json --runs 4 --acknowledge-data-sharing
+python -m scripts.compare_agents --case benchmarks/case-template.json --runs 4 --acknowledge-data-sharing
 ```
 
-Reports are written under the ignored `benchmark-results/` directory and contain
-only case id, verdict/metrics, latency, token usage, source fingerprint, and tool
-names — never the raw case content.
+`benchmarks/case-template.json` is a runnable template; for a real comparison, copy
+it into the gitignored `benchmarks/private/` and replace it with your own
+independently verified case and gold result. Reports are written under the ignored
+`benchmark-results/` directory and contain only case id, verdict/metrics, latency,
+token usage, source fingerprint, and tool names — never the raw case content.
 
 ## Documentation
 
