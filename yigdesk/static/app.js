@@ -1,504 +1,587 @@
-import { YigdeskSession } from "/session.js";
-import "/yig-grid.js";
-import "/yig-model-inspector.js";
+// Yigdesk board view + selector-aware human gate.
+// Renders the deterministic board projection and lets a human drive the two
+// gate ops (cast approval, request resolve) through the BoardSession client.
+// All domain labels (questions, metric labels, roles) come from board data;
+// this file holds no business vocabulary of its own.
+import { BoardSession } from "/session.js";
 
-const session = new YigdeskSession();
+const session = new BoardSession();
+const POLL_MS = 4000;
+
 const state = {
-  packet: null,
-  agent: null,
-  agentRun: null,
-  source: null,
-  council: null,
-  councilStatus: null,
-  councilPollTimer: null,
-  copyResetTimer: null,
+  board: { decisions: {} },
+  selectedId: null,
+  role: null,
+  outcomes: {}, // decisionId -> { pending } | { record, replayed }
+  error: null,
 };
-const byId = (id) => document.getElementById(id);
-const delay = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
-async function demoApi(path, payload) {
-  const response = await fetch(path, {
-    method: payload ? "POST" : "GET",
-    headers: { "Content-Type": "application/json", "X-Yigdesk-Action": "demo-fixture" },
-    body: payload ? JSON.stringify(payload) : undefined,
-  });
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error || body.code || "Request failed");
-  return body;
-}
+let root = null;
 
-function setStep(active) {
-  const order = ["read", "calculate", "trace", "review"];
-  const activeIndex = order.indexOf(active);
-  document.querySelectorAll(".process-strip li").forEach((item) => {
-    const index = order.indexOf(item.dataset.step);
-    item.classList.toggle("is-current", index === activeIndex);
-    item.classList.toggle("is-done", index < activeIndex);
-    if (index === activeIndex) item.setAttribute("aria-current", "step");
-    else item.removeAttribute("aria-current");
-  });
-}
+/* ------------------------------ DOM helper ------------------------------ */
 
-function renderStory(payload) {
-  const scenario = payload.scenario;
-  const source = payload.source || {};
-  state.source = source;
-  byId("requester").textContent = scenario.requester;
-  byId("requester-role").textContent = scenario.requester_role;
-  byId("recipient").textContent = scenario.recipient;
-  byId("sent-at").textContent = scenario.sent_at;
-  byId("subject").textContent = scenario.subject;
-  byId("message").textContent = scenario.message;
-  document.querySelectorAll("[data-scenario]").forEach((button) => {
-    const isActive = button.dataset.scenario === payload.scenario_id;
-    button.classList.toggle("is-active", isActive);
-    button.setAttribute("aria-pressed", String(isActive));
-  });
-  const sourceHash = source.sha256 || payload.workbook.fingerprint;
-  const sheetCount = Array.isArray(source.sheet_names) ? source.sheet_names.length : 0;
-  const uploaded = source.kind === "uploaded-synthetic-xlsx";
-  byId("source-pill").textContent = uploaded ? "UPLOADED · SYNTHETIC" : "SYNTHETIC FIXTURE";
-  byId("attachment-name").textContent = source.filename || "Northstar-renewal.xlsx";
-  byId("attachment-meta").textContent = `${sheetCount || 2} sheets · ${uploaded ? "parsed from uploaded bytes" : "generated synthetic fixture"}`;
-  byId("attachment-state").textContent = uploaded ? "parsed · read only" : "read only";
-  byId("workbook-name").textContent = (source.filename || "Northstar renewal").replace(/\.xlsx$/i, "");
-  byId("fingerprint").textContent = `source sha256 · ${sourceHash.slice(0, 12)}`;
-  configureAgent(payload.agent);
-}
-
-function configureAgent(agent) {
-  state.agent = agent || {
-    available: false,
-    mode: "local-preview",
-    model: null,
-    reasoning_effort: null,
-  };
-  const label = byId("analyze").querySelector(".action-label");
-  if (state.agent.available) {
-    label.textContent = "Analyze with nested Codex";
-    byId("read-wall").innerHTML = '<span aria-hidden="true">&#9673;</span> Optional nested Codex harness · standard tier · read only';
-  } else {
-    label.textContent = "Preview consequence locally";
-    byId("read-wall").innerHTML = '<span aria-hidden="true">&#9673;</span> Codex Work calls Yigdesk MCP directly · this button is a local deterministic preview';
+function el(tag, attrs = {}, kids = []) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key === "text") node.textContent = value;
+    else if (key === "class") node.className = value;
+    else if (key === "onClick") node.addEventListener("click", value);
+    else if (key === "onChange") node.addEventListener("change", value);
+    else node.setAttribute(key, value === true ? "" : String(value));
   }
+  for (const kid of Array.isArray(kids) ? kids : [kids]) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return node;
 }
 
-function revokeProof() {
-  state.packet = null;
-  state.agentRun = null;
-  state.council = null;
-  byId("decision-empty").hidden = false;
-  byId("decision-content").hidden = true;
-  byId("packet-export").hidden = true;
-  byId("decision-reason").textContent = "";
-  byId("net-arr").textContent = "—";
-  byId("arr-impact").textContent = "—";
-  byId("gross-margin").textContent = "—";
-  byId("headroom").textContent = "—";
-  byId("byte-proof").textContent = "No proof packet";
-  byId("evidence-list").replaceChildren();
-  byId("workbook-grid").packet = null;
-  byId("model-inspector").packet = null;
-  byId("agent-proof").hidden = true;
-  byId("agent-mode").textContent = "Codex + Yigdesk MCP";
-  byId("agent-meta").textContent = "run pending";
-  byId("agent-verified").textContent = "NOT VERIFIED";
-  byId("packet-id").textContent = "cpkt-pending";
-  byId("packet-scope").textContent = "synthetic adapter";
-  byId("packet-mark").textContent = "✓";
-  byId("packet-eyebrow").textContent = "Portable proof ready";
-  byId("packet-heading").textContent = "ConsequencePacket prepared.";
-  byId("memo-status").textContent = "NOT PREPARED";
-  byId("memo-body").textContent = "";
-  const copyButton = byId("copy-packet");
-  if (state.copyResetTimer !== null) {
-    window.clearTimeout(state.copyResetTimer);
-    state.copyResetTimer = null;
-  }
-  copyButton.disabled = true;
-  copyButton.firstElementChild.textContent = "Copy proof packet";
-  copyButton.dataset.state = "idle";
-  byId("a2a-scorecards").hidden = true;
-  byId("a2a-state").textContent = "AWAITING PROOF";
-  byId("a2a-intro").textContent = "Run the consequence preview to expose proposal, boundary, rounding, and stress-test facts. These are deterministic tool results—not simulated agent dialogue.";
-  byId("board-revision").textContent = "revision · pending";
-  byId("copy-council").disabled = true;
+/* ------------------------------ selectors ------------------------------- */
+
+function decisions() {
+  return (state.board && state.board.decisions) || {};
 }
 
-function renderCouncilStatus(status) {
-  state.councilStatus = status;
-  const roles = status.roles || {};
-  document.querySelectorAll("[data-council-actor]").forEach((item) => {
-    const currentExpected = Number(item.querySelector("strong").textContent.split("/")[1] || 0);
-    const role = roles[item.dataset.councilActor] || {
-      state: "pending",
-      completed: 0,
-      expected: currentExpected,
-    };
-    item.dataset.state = role.state;
-    item.querySelector("strong").textContent = `${role.completed}/${role.expected}`;
-  });
-  if (status.status === "verified") {
-    byId("a2a-state").textContent = "A2A VERIFIED";
-    byId("a2a-intro").textContent = "Codex Work completed the real actor-attributed council audit on this immutable revision. All accepted calls passed the independent verifier.";
-    return;
-  }
-  if (status.status === "running") {
-    byId("a2a-state").textContent = `COUNCIL ${status.accepted_progress_count}/${status.expected_call_count}`;
-    byId("a2a-intro").textContent = "Codex Work is calling the shared Yigdesk MCP directly. This progress comes from the session audit, not simulated agent dialogue.";
-    return;
-  }
-  if (status.status === "rejected") {
-    byId("a2a-state").textContent = "AUDIT REJECTED";
-    byId("a2a-intro").textContent = "The observed Codex Work trace did not match the active revision, so no council result is released.";
-    return;
-  }
-  if (status.status === "idle") {
-    byId("a2a-state").textContent = "CODEX WORK READY";
-    byId("a2a-intro").textContent = "Ask Codex to use $yigdesk-council for the current bound revision. The browser will follow the real MCP audit automatically.";
-    return;
-  }
-  byId("a2a-state").textContent = "BIND A REVISION";
-  byId("a2a-intro").textContent = "Upload a generated synthetic workbook here or bind one through $yigdesk-council before starting the agents.";
+function decisionList() {
+  return Object.values(decisions());
 }
 
-async function refreshCouncilStatus() {
-  try {
-    renderCouncilStatus(await session.getCouncilStatus());
-  } catch (error) {
-    console.error(error);
-  }
+function requiredRoles(d) {
+  return [...new Set((d.policy?.required_approvals || []).map((a) => a.role))];
 }
 
-async function pollCouncilStatus() {
-  await refreshCouncilStatus();
-  state.councilPollTimer = window.setTimeout(pollCouncilStatus, 1000);
-}
-
-function setEmptyDecision(heading, message) {
-  byId("decision-empty-heading").textContent = heading;
-  byId("decision-empty-message").textContent = message;
-}
-
-function clearPreview() {
-  revokeProof();
-  document.body.dataset.outcome = "idle";
-  byId("verdict").className = "verdict idle";
-  byId("verdict").textContent = "NOT ANALYZED";
-  byId("packet-status").textContent = "PREVIEW ONLY";
-  setEmptyDecision(
-    "Nothing inferred yet.",
-    "Run a read-only preview to bind all five output cells to one source packet.",
+function isResolved(d) {
+  return (
+    d.status === "resolved" ||
+    Boolean(d.resolution) ||
+    Boolean(state.outcomes[d.id]?.record)
   );
-  setStep("read");
 }
 
-function showAnalysisPending() {
-  revokeProof();
-  document.body.dataset.outcome = "analyzing";
-  byId("verdict").className = "verdict idle";
-  byId("verdict").textContent = "ANALYZING";
-  byId("packet-status").textContent = "VERIFYING";
-  setEmptyDecision(
-    "Building a fresh proof…",
-    "The previous result has been revoked while the engine verifies this run.",
-  );
-  setStep("calculate");
+function findMetric(candidate, id) {
+  return (candidate.consequence?.metrics || []).find((m) => m.id === id) || null;
 }
 
-function showAnalysisError(isAgent) {
-  revokeProof();
-  document.body.dataset.outcome = "error";
-  byId("verdict").className = "verdict error";
-  byId("verdict").textContent = isAgent ? "AGENT REJECTED" : "PREVIEW ERROR";
-  byId("packet-status").textContent = "NO VERIFIED PACKET";
-  setEmptyDecision(
-    "Analysis could not be verified.",
-    "No proof packet is available. Retry to produce a fresh, engine-matched result.",
-  );
-  setStep("trace");
+function metricNumber(candidate, id) {
+  const m = findMetric(candidate, id);
+  if (!m || m.after === null || m.after === undefined) return null;
+  const n = Number(m.after);
+  return Number.isNaN(n) ? null : n;
 }
 
-function renderPacket(packet, agentRun = null) {
-  state.packet = packet;
-  state.agentRun = agentRun;
-  const consequence = packet.consequence;
-  document.body.dataset.outcome = consequence.complete ? "ready" : "hold";
-  byId("decision-empty").hidden = true;
-  byId("decision-content").hidden = false;
-  byId("verdict").textContent = consequence.verdict;
-  byId("verdict").className = `verdict ${consequence.complete ? "ready" : "hold"}`;
-  byId("decision-reason").textContent = consequence.reason;
-  byId("net-arr").textContent = consequence.display.net_arr;
-  byId("arr-impact").textContent = consequence.display.arr_impact;
-  byId("gross-margin").textContent = consequence.display.gross_margin;
-  byId("headroom").textContent = consequence.display.headroom === "Unavailable"
-    ? "Floor check unavailable"
-    : `${consequence.display.headroom} above floor`;
-  byId("byte-proof").textContent = packet.analysis_bytes_unchanged
-    ? "Workbook bytes unchanged"
-    : "Source drift detected";
-  byId("packet-status").textContent = `${consequence.evidence_cells.length} CELLS · ${consequence.complete ? "COMPLETE" : "PARTIAL"}`;
-
-  const evidence = byId("evidence-list");
-  evidence.replaceChildren();
-  consequence.evidence_cells.forEach((cell) => {
-    const item = document.createElement("li");
-    const label = document.createElement("span");
-    const values = document.createElement("strong");
-    const address = document.createElement("code");
-    label.textContent = cell.role;
-    values.textContent = `${cell.before} → ${cell.after}`;
-    address.textContent = cell.address;
-    item.append(label, values, address);
-    evidence.append(item);
-  });
-
-  byId("workbook-grid").packet = packet;
-  byId("model-inspector").packet = packet;
-  if (agentRun?.agent) {
-    const trace = agentRun.agent;
-    const usage = trace.usage || {};
-    const tokens = (usage.input_tokens || 0) + (usage.output_tokens || 0);
-    byId("agent-mode").textContent = `Codex + Yigdesk MCP · ${trace.model}`;
-    byId("agent-meta").textContent = `${agentRun.run_id} · ${trace.tool_calls.length} tools · ${trace.latency_ms} ms · ${tokens} tokens`;
-    byId("agent-verified").textContent = "ENGINE MATCH VERIFIED";
-    byId("agent-proof").hidden = false;
-  } else {
-    byId("agent-proof").hidden = true;
+// Mirror the backend "max:<metric>" selector: eligible candidates are those
+// whose consequence verdict is "ok"; the winner has the greatest metric.after,
+// breaking ties on the greater candidate id.
+function policyWinner(d, metric) {
+  let best = null;
+  for (const c of Object.values(d.candidates || {})) {
+    if (!c.consequence || c.consequence.verdict !== "ok") continue;
+    const value = metricNumber(c, metric);
+    if (value === null) continue;
+    if (
+      best === null ||
+      value > best.value ||
+      (value === best.value && c.id > best.candidate.id)
+    ) {
+      best = { candidate: c, value };
+    }
   }
-  byId("packet-id").textContent = packet.packet_id;
-  byId("packet-scope").textContent = packet.implementation_scope;
-  byId("packet-mark").textContent = consequence.complete ? "✓" : "!";
-  byId("packet-eyebrow").textContent = consequence.complete ? "Portable proof ready" : "Refusal proof ready";
-  byId("packet-heading").textContent = consequence.complete ? "ConsequencePacket prepared." : "Hold packet prepared.";
-  byId("packet-export").hidden = false;
-  byId("copy-packet").disabled = false;
-  byId("memo-status").textContent = consequence.complete ? "DRAFT · NOT SENT" : "NOT PREPARED";
-  byId("memo-body").textContent = consequence.complete
-    ? `Requested terms preview at ${consequence.display.net_arr}, ${consequence.display.gross_margin} gross margin, ${consequence.display.headroom} above the floor.`
-    : "The memo is withheld because cost evidence is incomplete.";
-  setStep(consequence.complete ? "review" : "trace");
-  void renderDecisionBoard(packet);
+  return best ? best.candidate : null;
 }
 
-async function renderDecisionBoard(packet) {
-  byId("a2a-state").textContent = "CALCULATING";
-  byId("a2a-intro").textContent = "Yigdesk is evaluating the submitted proposal, exact floor boundary, first unsafe step, and one explicit COGS stress assumption.";
-  try {
-    const requested = packet.consequence.display.requested_discount.replace("%", "");
-    const [boundaryResult, stressResult] = await Promise.all([
-      demoApi("/api/proposals/boundary?step_pct=0.01"),
-      demoApi("/api/proposals/stress-test", {
-        requested_discount_pct: requested,
-        cogs_change_pct: "5",
+/* -------------------------------- render -------------------------------- */
+
+function reconcileSelection(list) {
+  if (list.length === 0) {
+    state.selectedId = null;
+    return;
+  }
+  if (list.length === 1) {
+    state.selectedId = list[0].id; // exactly one decision auto-selects
+    return;
+  }
+  const ids = new Set(list.map((d) => d.id));
+  if (state.selectedId && !ids.has(state.selectedId)) state.selectedId = null;
+  // Otherwise keep the current selection (preserved across polls).
+}
+
+function render() {
+  if (!root) return;
+  const list = decisionList();
+  reconcileSelection(list);
+
+  root.replaceChildren(renderToolbar(), renderError());
+
+  if (list.length === 0) {
+    root.append(
+      el("div", { "data-testid": "board-empty", class: "decision-empty" }, [
+        el("h3", { text: "No decisions on the board" }),
+        el("p", {
+          text: "Nothing has been proposed yet. Refresh once a decision is opened.",
+        }),
+      ]),
+    );
+    return;
+  }
+
+  if (list.length > 1) root.append(renderChooser(list));
+
+  const selected = state.selectedId ? decisions()[state.selectedId] : null;
+  if (!selected) {
+    root.append(
+      el("p", {
+        class: "board-hint",
+        text: "Choose a decision above to review its candidates and drive the gate.",
       }),
-    ]);
-    if (state.packet !== packet) return;
-    const boundary = boundaryResult.boundary;
-    const stress = stressResult.stress_test;
-    const submittedPass = packet.consequence.constraint_pass;
-    byId("board-requested").textContent = packet.consequence.display.requested_discount;
-    byId("board-requested-note").textContent = submittedPass
-      ? `${packet.consequence.display.gross_margin} exact-policy pass`
-      : `${packet.consequence.display.gross_margin} exact-policy fail`;
-    if (boundary.status === "READY") {
-      const safe = boundary.largest_safe_proposal;
-      const unsafe = boundary.first_unsafe_proposal;
-      byId("board-boundary").textContent = `${boundary.largest_safe_step_pct}%`;
-      byId("board-boundary-note").textContent = `exact ceiling ${boundary.exact_max_discount_pct}% · step 0.01`;
-      byId("board-rounding").textContent = `${unsafe.requested_discount_pct}%`;
-      byId("board-rounding-note").textContent = `${unsafe.display.gross_margin} displayed · ${unsafe.exact.gross_margin_pct}% exact · FAIL`;
-      state.council = { packet, boundary, stress };
-    } else {
-      byId("board-boundary").textContent = "HOLD";
-      byId("board-boundary-note").textContent = boundary.reason;
-      byId("board-rounding").textContent = "—";
-      byId("board-rounding-note").textContent = "No grounded boundary";
-      state.council = { packet, boundary, stress };
+    );
+    return;
+  }
+  root.append(renderDecision(selected));
+}
+
+function renderToolbar() {
+  return el("div", { class: "board-toolbar" }, [
+    el(
+      "button",
+      {
+        "data-testid": "refresh",
+        type: "button",
+        class: "upload-action",
+        onClick: onRefresh,
+      },
+      [
+        el("span", { text: "Refresh board" }),
+        el("span", { "aria-hidden": "true", text: "↻" }),
+      ],
+    ),
+  ]);
+}
+
+function renderError() {
+  const box = el("p", {
+    "data-testid": "error",
+    class: "upload-status",
+    "data-state": "error",
+    role: "alert",
+    "aria-live": "assertive",
+  });
+  if (state.error) box.textContent = state.error;
+  else box.hidden = true;
+  return box;
+}
+
+function renderChooser(list) {
+  const chooser = el("div", {
+    "data-testid": "decision-chooser",
+    class: "scenario-switch",
+    role: "group",
+    "aria-label": "Open decisions",
+  });
+  for (const d of list) {
+    const active = d.id === state.selectedId;
+    chooser.append(
+      el(
+        "button",
+        {
+          "data-testid": "decision-option",
+          "data-decision-id": d.id,
+          type: "button",
+          class: "scenario-button" + (active ? " is-active" : ""),
+          "aria-pressed": String(active),
+          onClick: () => onSelectDecision(d.id),
+        },
+        [
+          el("span", {}, [
+            el("strong", { text: d.question || d.id }),
+            el("small", { text: `${d.decision_type} · ${d.status}` }),
+          ]),
+        ],
+      ),
+    );
+  }
+  return chooser;
+}
+
+function renderDecision(d) {
+  const view = el("section", {
+    "data-testid": "decision-view",
+    "data-decision-id": d.id,
+    class: "panel decision-panel",
+  });
+  view.append(
+    el("header", { class: "panel-heading" }, [
+      el("div", {}, [
+        el("p", { class: "eyebrow", text: d.decision_type }),
+        el("h2", { text: d.question || d.id }),
+      ]),
+      el("span", {
+        class: "disk-state",
+        "data-decision-status": d.status,
+        text: d.status,
+      }),
+    ]),
+  );
+  view.append(renderCandidates(d));
+  view.append(renderClaims(d));
+  view.append(renderGate(d));
+  return view;
+}
+
+function renderCandidates(d) {
+  const cands = Object.values(d.candidates || {});
+  const wrap = el("div", { class: "candidate-list" });
+  wrap.append(
+    el("div", { class: "evidence-header" }, [
+      el("span", { text: "Candidates" }),
+      el("span", { text: `${cands.length} priced` }),
+    ]),
+  );
+  if (cands.length === 0) {
+    wrap.append(el("p", { class: "board-hint", text: "No candidates proposed." }));
+    return wrap;
+  }
+  for (const c of cands) wrap.append(renderCandidate(c));
+  return wrap;
+}
+
+function renderCandidate(c) {
+  const verdict = c.consequence ? c.consequence.verdict : "hold";
+  const tone = verdict === "ok" ? "ready" : "hold";
+  const card = el("article", {
+    "data-testid": "candidate",
+    "data-candidate-id": c.id,
+    class: "candidate",
+    "data-verdict": verdict,
+  });
+  card.append(
+    el("div", { class: "candidate-head" }, [
+      el("div", {}, [
+        el("strong", { text: c.id }),
+        c.author ? el("small", { text: ` · ${c.author}` }) : null,
+      ]),
+      el("span", { class: `verdict ${tone}`, text: verdict }),
+    ]),
+  );
+
+  const metrics = c.consequence?.metrics || [];
+  if (metrics.length) {
+    const grid = el("div", { class: "metrics" });
+    for (const m of metrics) {
+      grid.append(
+        el("div", { class: "metric" }, [
+          el("span", { text: m.label }),
+          el("strong", {
+            text: m.value === null || m.value === undefined ? "—" : String(m.value),
+          }),
+          el("small", { text: m.unit || "" }),
+        ]),
+      );
     }
-    const stressProposal = stress.proposal;
-    byId("board-stress").textContent = stressProposal
-      ? stressProposal.display.gross_margin
-      : "HOLD";
-    byId("board-stress-note").textContent = stressProposal
-      ? `${stressProposal.verdict} · temporary assumption`
-      : stress.reason;
-    byId("board-revision").textContent = `${packet.revision_id} · ${packet.source_fingerprint.slice(0, 16)} · ${packet.packet_id}`;
-    byId("a2a-scorecards").hidden = false;
-    byId("a2a-state").textContent = "A2A READY";
-    byId("a2a-intro").textContent = "Finance, sales, risk, and optimizer agents can now challenge one another through these same read-only tools and must return matching revision identifiers.";
-    byId("copy-council").disabled = false;
-  } catch (error) {
-    if (state.packet !== packet) return;
-    byId("a2a-state").textContent = "BOARD UNAVAILABLE";
-    byId("a2a-intro").textContent = "The deterministic proposal board did not complete, so no A2A-ready claim is released.";
-    console.error(error);
+    card.append(grid);
   }
+
+  const refs = c.consequence?.evidence_refs || [];
+  if (refs.length) {
+    card.append(
+      el("div", { class: "candidate-evidence" }, [
+        el("span", { class: "evidence-label", text: "Evidence: " }),
+        ...refs.map((r) => el("code", { text: r })),
+      ]),
+    );
+  }
+  return card;
 }
 
-async function uploadWorkbook(event) {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = byId("upload-action");
-  const status = byId("upload-status");
-  button.disabled = true;
-  status.dataset.state = "loading";
-  status.textContent = "Reading workbook bytes and validating the synthetic P&L schema…";
-  try {
-    const response = await fetch("/api/upload", {
-      method: "POST",
-      headers: { "X-Yigdesk-Action": "synthetic-upload" },
-      body: new FormData(form),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || payload.code || "Upload failed");
-    clearPreview();
-    renderStory(payload);
-    await byId("workbook-grid").refresh();
-    await refreshCouncilStatus();
-    status.dataset.state = "ready";
-    status.textContent = `${payload.source.filename} · ${(payload.source.size_bytes / 1024 / 1024).toFixed(2)} MB · ${payload.source.extraction.revenue_cells.length + payload.source.extraction.cogs_cells.length} FY2024 source cells · sha256 ${payload.source.sha256.slice(0, 12)}`;
-  } catch (error) {
-    status.dataset.state = "error";
-    status.textContent = error instanceof Error ? error.message : "Workbook upload failed safely.";
-    console.error(error);
-  } finally {
-    button.disabled = false;
+function renderClaims(d) {
+  const claims = Object.values(d.claims || {});
+  const wrap = el("div", { class: "claim-list" });
+  wrap.append(
+    el("div", { class: "evidence-header" }, [el("span", { text: "Grounded claims" })]),
+  );
+  if (claims.length === 0) {
+    wrap.append(el("p", { class: "board-hint", text: "No grounded claims." }));
+    return wrap;
   }
+  for (const cl of claims) {
+    wrap.append(
+      el("div", { "data-testid": "claim", class: "claim" }, [
+        el("span", { class: "scope-chip", text: cl.type }),
+        el("p", { class: "claim-body", text: cl.body }),
+      ]),
+    );
+  }
+  return wrap;
 }
 
-async function copyCouncilPrompt() {
-  if (!state.council || !state.packet) return;
-  const packet = state.packet;
-  const prompt = `Use $yigdesk-council on the current bound Yigdesk revision. Keep orchestration in this Codex Work task; do not start a nested codex exec. Spawn finance_analyst, sales_advocate, and risk_challenger in parallel. On every call pass the matching actor. Finance must make exactly: get_deal_context, find_feasible_boundary(0.01), evaluate_proposal(submitted), inspect_evidence(Deal Model!B4). Sales must make exactly: get_deal_context, evaluate_proposal(submitted), evaluate_proposal(one alternative). Risk must make exactly: get_deal_context, list_missing_evidence, find_feasible_boundary(0.01), stress_test_assumption(submitted,+5% COGS), inspect_evidence(Deal Model!B4). Require revision_id ${packet.revision_id}, source_fingerprint ${packet.source_fingerprint}, and packet_id ${packet.packet_id} from all three, then spawn decision_optimizer for exactly: get_deal_context, compare_proposals(submitted, sales alternative, largest safe step, first unsafe), inspect_evidence(Deal Model!B4). No other Yigdesk calls. Distinguish financial feasibility from commercial optimality; do not invent market evidence and do not approve, send, or write back.`;
-  try {
-    await navigator.clipboard.writeText(prompt);
-    byId("copy-council").firstChild.textContent = "Council prompt copied ";
-  } catch (error) {
-    console.error(error);
-  }
+/* --------------------------------- gate --------------------------------- */
+
+function renderGate(d) {
+  const resolved = isResolved(d);
+  const selector = d.policy?.candidate_selector || "human_selected";
+  const gate = el("section", { "data-testid": "gate-panel", class: "gate-panel" });
+  gate.append(
+    el("div", { class: "evidence-header" }, [
+      el("span", { text: "Human gate" }),
+      el("span", { text: selector }),
+    ]),
+  );
+  gate.append(renderRoleSelect(d));
+  gate.append(
+    selector.startsWith("max:")
+      ? renderPolicyControls(d, selector.slice(4), resolved)
+      : renderHumanSelectControls(d, resolved),
+  );
+  gate.append(
+    el(
+      "button",
+      {
+        "data-testid": "resolve",
+        type: "button",
+        class: "primary-action",
+        disabled: resolved,
+        onClick: () => onResolve(d.id),
+      },
+      [
+        el("span", {
+          class: "action-label",
+          text: resolved ? "Decision resolved" : "Resolve decision",
+        }),
+      ],
+    ),
+  );
+  gate.append(renderOutcome(d));
+  return gate;
 }
 
-async function runWithCodex(label) {
-  let run = await session.startAgentRun(state.agent?.request_token);
-  const deadline = Date.now() + 120000;
-  const phaseLabels = {
-    starting_codex: "Codex · starting…",
-    calling_yigdesk_tools: "Codex · calling Yigdesk tools…",
-    verifying_result: "Codex · verifying result…",
-  };
-  while (run.status === "queued" || run.status === "running") {
-    label.textContent = phaseLabels[run.stage] || "Codex · working…";
-    if (Date.now() >= deadline) throw new Error("Codex run timed out.");
-    await delay(250);
-    run = await session.getAgentRun(run.run_id);
+function renderRoleSelect(d) {
+  const roles = requiredRoles(d);
+  const options = roles.length ? roles : [""];
+  if (!options.includes(state.role)) state.role = options[0];
+  const select = el("select", {
+    "data-testid": "role-select",
+    class: "role-select",
+    "aria-label": "Acting role",
+    onChange: (event) => {
+      state.role = event.target.value;
+    },
+  });
+  for (const r of options) {
+    select.append(el("option", { value: r, text: r || "(no attributed role)" }));
   }
-  if (run.status !== "completed") {
-    throw new Error(run.error?.message || "Codex output was rejected.");
-  }
-  return run;
+  select.value = state.role;
+  return el("label", { class: "role-field" }, [
+    el("span", { class: "evidence-label", text: "Acting as" }),
+    select,
+  ]);
 }
 
-async function analyze() {
-  const button = byId("analyze");
-  const label = button.querySelector(".action-label");
-  button.disabled = true;
-  button.dataset.state = "loading";
-  button.setAttribute("aria-busy", "true");
-  byId("workspace").setAttribute("aria-busy", "true");
-  document.querySelectorAll("[data-scenario]").forEach((scenarioButton) => { scenarioButton.disabled = true; });
-  label.textContent = "Reading + tracing…";
-  showAnalysisPending();
-  try {
-    if (state.agent?.available) {
-      const run = await runWithCodex(label);
-      renderPacket(run.packet, run);
-      label.textContent = "Analyze again with Codex";
-    } else {
-      const response = await session.previewConsequence();
-      renderPacket(response.packet);
-      label.textContent = "Preview again locally";
+function renderHumanSelectControls(d, resolved) {
+  const cands = Object.values(d.candidates || {});
+  const wrap = el("div", { class: "gate-actions" });
+  if (cands.length === 0) {
+    wrap.append(el("p", { class: "board-hint", text: "No candidates to approve." }));
+    return wrap;
+  }
+  for (const c of cands) {
+    const eligible = Boolean(c.consequence && c.consequence.verdict === "ok");
+    wrap.append(
+      el("div", { class: "gate-row" }, [
+        el(
+          "button",
+          {
+            "data-testid": "approve-candidate",
+            "data-candidate-id": c.id,
+            type: "button",
+            class: "upload-action",
+            disabled: resolved,
+            onClick: () => onApprove(d.id, c.id),
+          },
+          [
+            el("span", { text: `Approve ${c.id}` }),
+            el("span", { "aria-hidden": "true", text: "→" }),
+          ],
+        ),
+        el("button", {
+          "data-testid": "hold-candidate",
+          "data-candidate-id": c.id,
+          type: "button",
+          class: "ghost-button",
+          disabled: resolved,
+          onClick: () => onHold(d.id, c.id),
+          text: "Hold",
+        }),
+        el("small", { class: "gate-note", text: eligible ? "eligible" : "on hold" }),
+      ]),
+    );
+  }
+  return wrap;
+}
+
+function renderPolicyControls(d, metric, resolved) {
+  const winner = policyWinner(d, metric);
+  const wrap = el("div", { class: "gate-actions" });
+
+  const winnerBox = el("div", { "data-testid": "policy-winner", class: "hero-proof" });
+  winnerBox.append(el("span", { text: `Policy selector · max:${metric}` }));
+  if (winner) {
+    const m = findMetric(winner, metric);
+    const detail = m ? `${m.value ?? "—"} ${m.unit || ""}`.trim() : "";
+    winnerBox.append(el("strong", { text: winner.id }));
+    winnerBox.append(el("small", { text: detail ? `${metric} ${detail}` : metric }));
+  } else {
+    winnerBox.append(el("strong", { text: "No eligible candidate" }));
+  }
+  wrap.append(winnerBox);
+
+  wrap.append(
+    el("div", { class: "gate-row" }, [
+      el(
+        "button",
+        {
+          "data-testid": "authorize-policy",
+          type: "button",
+          class: "upload-action",
+          disabled: resolved,
+          onClick: () => onApprove(d.id, d.id), // decision-scoped approve
+        },
+        [
+          el("span", { text: "Authorize policy selection" }),
+          el("span", { "aria-hidden": "true", text: "→" }),
+        ],
+      ),
+      el("button", {
+        "data-testid": "hold-policy",
+        type: "button",
+        class: "ghost-button",
+        disabled: resolved,
+        onClick: () => onHold(d.id, d.id),
+        text: "Hold",
+      }),
+    ]),
+  );
+  return wrap;
+}
+
+function renderOutcome(d) {
+  const box = el("div", {
+    "data-testid": "resolve-outcome",
+    class: "resolve-outcome",
+    role: "status",
+    "aria-live": "polite",
+  });
+  const outcome = state.outcomes[d.id] || {};
+  const record = d.resolution || outcome.record || null;
+  const pending = outcome.pending || null;
+
+  if (record) {
+    box.setAttribute("data-outcome", "committed");
+    box.append(el("p", { class: "outcome-line", text: "Decision resolved." }));
+    box.append(
+      el("dl", { class: "outcome-record" }, [
+        el("dt", { text: "Chosen candidate" }),
+        el("dd", { text: record.chosen_candidate_id }),
+        el("dt", { text: "Closed by" }),
+        el("dd", { text: record.closed_by }),
+      ]),
+    );
+    if (record.rationale) {
+      box.append(el("p", { class: "outcome-rationale", text: record.rationale }));
     }
-  } catch (error) {
-    label.textContent = state.agent?.available ? "Retry Codex analysis" : "Retry local preview";
-    showAnalysisError(Boolean(state.agent?.available));
-    console.error(error);
-  } finally {
-    button.disabled = false;
-    button.dataset.state = "idle";
-    button.removeAttribute("aria-busy");
-    byId("workspace").removeAttribute("aria-busy");
-    document.querySelectorAll("[data-scenario]").forEach((scenarioButton) => { scenarioButton.disabled = false; });
+    if (outcome.replayed) {
+      box.append(el("small", { class: "gate-note", text: "replayed (idempotent)" }));
+    }
+  } else if (pending) {
+    box.setAttribute("data-outcome", "pending");
+    box.append(el("p", { class: "outcome-line", text: "Not resolved yet." }));
+    box.append(el("p", { class: "outcome-reason", text: pending }));
+  } else {
+    box.hidden = true;
   }
+  return box;
 }
 
-async function chooseScenario(scenarioId) {
-  const scenarioSwitch = document.querySelector(".scenario-switch");
-  scenarioSwitch.setAttribute("aria-busy", "true");
-  document.querySelectorAll("[data-scenario]").forEach((button) => { button.disabled = true; });
+/* ------------------------------ controller ------------------------------ */
+
+function onSelectDecision(id) {
+  state.selectedId = id;
+  state.error = null;
+  render();
+}
+
+async function onRefresh() {
   try {
-    const payload = await demoApi("/api/reset", { scenario_id: scenarioId });
-    clearPreview();
-    renderStory(payload);
-    await byId("workbook-grid").refresh();
-    await refreshCouncilStatus();
-    byId("upload-status").dataset.state = "";
-    byId("upload-status").textContent = "Built-in synthetic fixture restored.";
-  } finally {
-    document.querySelectorAll("[data-scenario]").forEach((button) => { button.disabled = false; });
-    scenarioSwitch.removeAttribute("aria-busy");
+    state.error = null;
+    state.board = await session.getBoard();
+  } catch (err) {
+    state.error = errorText(err);
   }
+  render();
 }
 
-async function copyPacket() {
-  if (!state.packet) return;
-  const packet = state.packet;
-  const button = byId("copy-packet");
-  const label = button.firstElementChild;
+function onApprove(decisionId, scope) {
+  return runOp(decisionId, false, () =>
+    session.castApproval(decisionId, { verdict: "approve", scope, role: state.role }),
+  );
+}
+
+function onHold(decisionId, scope) {
+  return runOp(decisionId, false, () =>
+    session.castApproval(decisionId, { verdict: "hold", scope, role: state.role }),
+  );
+}
+
+function onResolve(decisionId) {
+  return runOp(decisionId, true, () => session.requestResolve(decisionId));
+}
+
+async function runOp(decisionId, isResolve, fn) {
   try {
-    const proof = state.agentRun || { packet: state.packet, mode: "local-preview" };
-    await navigator.clipboard.writeText(JSON.stringify(proof, null, 2));
-    if (state.packet !== packet) return;
-    label.textContent = "Packet copied";
-    button.dataset.state = "copied";
-    state.copyResetTimer = window.setTimeout(() => {
-      state.copyResetTimer = null;
-      if (state.packet !== packet) return;
-      label.textContent = "Copy proof packet";
-      button.dataset.state = "idle";
-    }, 1800);
-  } catch (error) {
-    label.textContent = "Copy unavailable";
-    console.error(error);
+    state.error = null;
+    const res = await fn();
+    if (res && res.board) state.board = res.board;
+    if (isResolve) state.outcomes[decisionId] = (res && res.result) || {};
+    else delete state.outcomes[decisionId]; // gate state changed; drop stale pending
+  } catch (err) {
+    state.error = errorText(err);
+  }
+  render();
+}
+
+function errorText(err) {
+  return err && err.message ? err.message : String(err);
+}
+
+/* --------------------------------- boot --------------------------------- */
+
+async function pollBoard() {
+  try {
+    const board = await session.getBoard();
+    // Re-render only on real change; selection is preserved by reconcileSelection.
+    if (JSON.stringify(board) !== JSON.stringify(state.board)) {
+      state.board = board;
+      render();
+    }
+  } catch (err) {
+    // Background poll: stay quiet and keep the last good render.
+    console.error(err);
   }
 }
 
-document.addEventListener("DOMContentLoaded", async () => {
-  const grid = byId("workbook-grid");
-  const inspector = byId("model-inspector");
-  grid.session = session;
-  inspector.session = session;
-  inspector.selectedRef = "Deal Model!B2";
-  grid.addEventListener("yig-selection-change", (event) => {
-    inspector.selectedRef = event.detail.address;
-  });
-  byId("analyze").addEventListener("click", analyze);
-  byId("copy-packet").addEventListener("click", copyPacket);
-  byId("copy-council").addEventListener("click", copyCouncilPrompt);
-  byId("upload-form").addEventListener("submit", uploadWorkbook);
-  byId("workbook-upload").addEventListener("change", (event) => {
-    const file = event.target.files?.[0];
-    byId("upload-file-label").textContent = file?.name || "Choose synthetic FY2024 workbook";
-    byId("upload-file-meta").textContent = file
-      ? `${(file.size / 1024 / 1024).toFixed(2)} MB · ready to send to local parser`
-      : "The browser sends the selected file to this local demo process.";
-  });
-  document.querySelectorAll("[data-scenario]").forEach((button) => {
-    button.addEventListener("click", () => chooseScenario(button.dataset.scenario));
-  });
-  const payload = await demoApi("/api/state");
-  clearPreview();
-  renderStory(payload);
-  await pollCouncilStatus();
-});
+async function init() {
+  root = document.querySelector('[data-testid="board-root"]');
+  if (!root) return;
+  try {
+    state.board = await session.getBoard();
+  } catch (err) {
+    state.error = errorText(err);
+  }
+  render();
+  window.setInterval(pollBoard, POLL_MS);
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init);
+} else {
+  init();
+}
