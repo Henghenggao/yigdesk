@@ -29,16 +29,19 @@ POLICY = {
     "required_claims": [{"type": "risk"}],
     "candidate_selector": "max:headroom",
 }
+HUMAN_POLICY = {**POLICY, "candidate_selector": "human_selected"}
 
 
-def _seed_decision(bb, decision_id: str, question: str) -> None:
+def _seed_decision(
+    bb, decision_id: str, question: str, *, policy=POLICY, include_hold: bool = False
+) -> None:
     """Open one fully-populated council_discount decision on the shared ledger.
 
     discount=2 keeps headroom above the floor, so the candidate prices to an
     `ok` verdict and the `max:headroom` selector can commit deterministically.
     """
     bb.open_decision(
-        decision_id, question, "council_discount", POLICY, actor="agent:mcp", role="owner"
+        decision_id, question, "council_discount", policy, actor="agent:mcp", role="owner"
     )
     bb.propose_candidate(
         decision_id, "c1", {"overrides": {"discount": 2}}, actor="finance", role="proposer"
@@ -53,6 +56,14 @@ def _seed_decision(bb, decision_id: str, question: str) -> None:
         actor="risk",
         role="critic",
     )
+    if include_hold:
+        bb.propose_candidate(
+            decision_id,
+            "hold",
+            {"overrides": {"discount": "invalid"}},
+            actor="finance",
+            role="proposer",
+        )
 
 
 def main() -> None:
@@ -62,6 +73,9 @@ def main() -> None:
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--multi", action="store_true", help="Seed two decisions (chooser state).")
     group.add_argument("--empty", action="store_true", help="Seed an empty board (no decisions).")
+    group.add_argument(
+        "--human-selected", action="store_true", help="Seed a human-selected decision with a HOLD candidate."
+    )
     a = ap.parse_args()
 
     # Start from a clean ledger so each E2E spec observes exactly what it seeded.
@@ -73,10 +87,17 @@ def main() -> None:
         print("seeded", a.ledger, "(empty)")
         return
 
-    _seed_decision(bb, "d1", "Approve the discount?")
+    _seed_decision(
+        bb,
+        "d1",
+        "Approve the discount?",
+        policy=HUMAN_POLICY if a.human_selected else POLICY,
+        include_hold=a.human_selected,
+    )
     if a.multi:
         _seed_decision(bb, "d2", "Approve the pilot expansion?")
-    print("seeded", a.ledger, "(multi)" if a.multi else "(single)")
+    mode = "multi" if a.multi else "human-selected" if a.human_selected else "single"
+    print("seeded", a.ledger, f"({mode})")
 
 
 if __name__ == "__main__":

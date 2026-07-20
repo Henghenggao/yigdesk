@@ -20,6 +20,14 @@ def test_policy_selector_closes_deterministically():
     assert not isinstance(rec, Pending)
     assert rec.chosen_candidate_id == "c1" and rec.closed_by == "policy" and rec.evaluator_revision == "expr:rev"
 
+def test_policy_selector_breaks_metric_ties_by_greatest_candidate_id():
+    d = _decision("max:headroom", [Approval("human:cfo","cfo","approve","d1")])
+    d.candidates["z_tie"] = Candidate("z_tie","agent:z",{"overrides":{"discount":12}},
+        Consequence("ok",[Metric("headroom","Headroom","5.45","6.0","5.45","pt")],[],"fp"))
+    rec = resolve(d, "expr:rev")
+    assert not isinstance(rec, Pending)
+    assert rec.chosen_candidate_id == "z_tie"
+
 def _decision_hs(approvals, hold=False):
     from yigdesk.core.model import Decision, Candidate, Consequence, Metric
     d = Decision("d1","q","x",{"candidate_selector":"human_selected"})

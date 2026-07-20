@@ -194,6 +194,7 @@ def test_optimizer_advises_but_never_closes_the_decision():
     assert "non-binding" in instructions
     assert "request_resolve" in instructions  # named as the op it must NOT call
     assert "recommended_candidate_id" in instructions
+    assert "lexicographically greatest candidate id" in instructions
 
 
 def test_role_outputs_speak_the_new_op_vocabulary():

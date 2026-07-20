@@ -86,8 +86,9 @@ upload-to-board wiring lands (a known follow-up).
 
 The bind/session/state steps above stay useful for session integrity only: run
 `python -m yigdesk.cli state` to confirm the active session matches its bind receipt.
-The optional read app (`python -m yigdesk.app`, `http://127.0.0.1:8787`) is only an
-evidence view; do not make the user open it to obtain the answer.
+The optional web app (`python -m yigdesk.app`, `http://127.0.0.1:8787`) is the
+human board + gate view over that same scenario and ledger; do not make the user
+open it to obtain the answer.
 
 ## Council latency contract
 
@@ -128,8 +129,9 @@ deterministic gate closes a decision.
    priced consequence or its grounded claim.
 
 3. Only after those three land on the board, spawn `decision_optimizer`. Require
-   exactly: `read_board` (compare the priced candidates by exact headroom), then
-   `post_claim` a non-binding advisory recommendation. The optimizer must not
+   exactly: `read_board` (compare the priced candidates by exact headroom; on an
+   exact tie mirror the gate and use the lexicographically greatest candidate id),
+   then `post_claim` a non-binding advisory recommendation. The optimizer must not
    `propose_candidate` and must not `request_resolve` - it advises, it does not close.
 
 4. As the orchestrator or human reviewer, `cast_approval` on the chosen candidate
@@ -167,7 +169,7 @@ Lead with the answer and report the committed DecisionRecord:
 - the boundary candidate's remaining headroom and the grounded `risk` claim that gates
   the close;
 - the closing selector, evidence refs, and source-fingerprint prefix from the record;
-- `http://127.0.0.1:8787` only as an optional evidence-view link.
+- `http://127.0.0.1:8787` only as an optional board-and-gate link.
 
 If `request_resolve` returned `pending`, report the reason and the missing approval or
 grounded claim instead of a recommendation. Keep every figure grounded in the priced

@@ -1,4 +1,6 @@
 from openpyxl import Workbook
+import pytest
+
 from yigdesk.core.blackboard import Blackboard
 from yigdesk.evaluator.expression import ExpressionEvaluator
 from yigdesk.evaluator.model_source import ModelSource
@@ -39,6 +41,23 @@ def test_ungrounded_claim_is_rejected(tmp_path):
     claim = bb.post_claim("d1","cl1","evidence","d1","note",["Deal Inputs!Z99"], actor="agent:a", role="critic")
     assert claim.status == "rejected"
 
+
+@pytest.mark.parametrize("ref", ["not-a-ref", "Missing!A1", "Deal Inputs!A1:A2"])
+def test_malformed_or_non_cell_claim_refs_fail_closed(tmp_path, ref):
+    bb = _bb(tmp_path)
+    bb.open_decision("d1", "q", "discount", {}, actor="h", role="owner")
+
+    claim = bb.post_claim(
+        "d1", "cl1", "evidence", "d1", "note", [ref],
+        actor="agent:a", role="critic",
+    )
+
+    assert claim.status == "rejected"
+    op = bb.ledger.read()[-1]
+    assert op.kind == "post_claim"
+    assert op.payload["status"] == "rejected"
+    assert op.payload["grounded_refs"] == []
+
 def _resolvable_blackboard(tmp_path):
     """A council-style d1 driven to a fully resolvable state.
 
@@ -75,3 +94,64 @@ def test_request_resolve_is_idempotent(tmp_path):
     resolved_2 = [o for o in bb.ledger.read() if o.kind == "resolved"]
     assert len(resolved_2) == 1                     # NO second resolved op
     assert second == first                          # same record
+
+
+def test_resolved_decision_cannot_be_reopened(tmp_path):
+    bb = _resolvable_blackboard(tmp_path)
+    first = bb.request_resolve("d1", actor="human:web", role="cfo")
+
+    with pytest.raises(ValueError, match="already exists"):
+        bb.open_decision(
+            "d1", "A replacement question", "council_discount", {},
+            actor="human:web", role="owner",
+        )
+
+    decision = bb.project().decisions["d1"]
+    assert decision.status == "resolved"
+    assert decision.resolution == first
+    assert len([op for op in bb.ledger.read() if op.kind == "resolved"]) == 1
+
+
+def test_resolved_decision_rejects_all_later_mutations(tmp_path):
+    bb = _resolvable_blackboard(tmp_path)
+    bb.request_resolve("d1", actor="human:web", role="cfo")
+    before = bb.ledger.read()
+
+    with pytest.raises(ValueError, match="resolved"):
+        bb.propose_candidate(
+            "d1", "late-candidate", {"overrides": {"discount": 1}},
+            actor="agent:late", role="proposer",
+        )
+    with pytest.raises(ValueError, match="resolved"):
+        bb.post_claim(
+            "d1", "late-claim", "risk", "d1", "late",
+            ["Deal Inputs!B4"], actor="agent:late", role="critic",
+        )
+    with pytest.raises(ValueError, match="resolved"):
+        bb.cast_approval(
+            "d1", "hold", "d1", actor="human:web", role="cfo",
+        )
+
+    assert bb.ledger.read() == before
+
+
+def test_projection_keeps_a_resolved_record_terminal_if_log_contains_late_ops(tmp_path):
+    bb = _resolvable_blackboard(tmp_path)
+    record = bb.request_resolve("d1", actor="human:web", role="cfo")
+
+    # A ledger imported from an older build may already contain invalid late
+    # operations. Replaying it must preserve the first committed record.
+    bb.ledger.append(
+        "open_decision", "legacy", "owner",
+        {"decision_id": "d1", "question": "replacement", "decision_type": "x", "policy": {}},
+    )
+    bb.ledger.append(
+        "cast_approval", "legacy", "cfo",
+        {"decision_id": "d1", "verdict": "hold", "scope": "d1"},
+    )
+
+    decision = bb.project().decisions["d1"]
+    assert decision.status == "resolved"
+    assert decision.resolution == record
+    assert decision.question == "Approve the requested discount?"
+    assert len(decision.approvals) == 1

@@ -142,7 +142,7 @@ def test_uploaded_workbook_binds_the_live_session_and_source_proof(tmp_path):
     # The upload is copied byte-for-byte into the immutable session source.
     assert app.config["YIGDESK_STATE"].active_source_path == bound.source_path
     assert bound.source_path.read_bytes() == source_bytes
-    assert not bound.audit_path.exists()
+    assert "council" not in bound.manifest
 
 
 def test_reset_after_upload_stays_on_the_fixture_despite_the_active_pointer(tmp_path):

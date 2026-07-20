@@ -19,8 +19,10 @@ committed `DecisionRecord` is the outcome.
 
 ## The six board operations
 
-The entire agent-facing surface is six operations (`yigdesk/blackboard_mcp.py`),
-each recorded as one immutable entry on the ledger:
+The entire agent-facing surface is six operations (`yigdesk/blackboard_mcp.py`).
+The four direct mutations append one immutable op, `read_board` is a pure
+projection, and a successful `request_resolve` appends the committed `resolved`
+record (`pending` appends nothing):
 
 | Op | Who calls it | Effect |
 | --- | --- | --- |
@@ -85,7 +87,7 @@ approval and calls `request_resolve`; the deterministic gate closes the decision
 
 Requirements: Python 3.11+ (and Node.js 20+ only for the Playwright end-to-end
 tests). Everything is local and synthetic; no external credential is needed to run
-the blackboard, the evaluator, or the web shell.
+the blackboard, the evaluator, or the web board.
 
 ```bash
 python -m pip install -r requirements.txt
@@ -94,7 +96,8 @@ python -m pytest                          # run the full test suite
 ```
 
 Run the **MCP server** so an agent client (or MCP Inspector) can call the six ops.
-It reads `YIGDESK_SCENARIO` (the scenario directory to price against — required)
+It reads `YIGDESK_SCENARIO` (the scenario directory to price against, default
+`data/scenarios/council_discount`)
 and `YIGDESK_LEDGER` (the append-only board ledger, default `runtime/board.jsonl`):
 
 ```bash
@@ -106,13 +109,20 @@ generate a sample first with `python -m scripts.generate_sample_workbook`):
 
 ```bash
 python -m yigdesk.cli bind --file runtime/northwind-fy2024-synthetic.xlsx --discount 2 --floor 30
+python -m yigdesk.cli state
 ```
 
-Serve the **minimal web shell** — a read-only evidence view exposing only
-health, synthetic-workbook upload, and static assets — on <http://127.0.0.1:8787>:
+Binding verifies and preserves an upload, but the live board still prices the
+scenario selected by `YIGDESK_SCENARIO`; upload-to-board selection is a separate
+future integration.
+
+Serve the **web board + human gate** on <http://127.0.0.1:8787>. It reads the
+same scenario and ledger as the MCP server, renders candidates, grounded claims,
+approvals, and committed records, and lets a human cast approvals and request
+resolution:
 
 ```bash
-python -m yigdesk.app
+YIGDESK_SCENARIO=data/scenarios/council_discount YIGDESK_LEDGER=runtime/board.jsonl python -m yigdesk.app
 ```
 
 ## Benchmark: bare agent vs. blackboard
@@ -136,7 +146,7 @@ token usage, source fingerprint, and tool names — never the raw case content.
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — the five units, the op/data model, and D1–D4.
-- [Design system](docs/DESIGN_SYSTEM.md) — the Evidence Ledger visual language for the web shell.
+- [Design system](docs/DESIGN_SYSTEM.md) — the Evidence Ledger visual language for the web board.
 
 ## License and rights
 

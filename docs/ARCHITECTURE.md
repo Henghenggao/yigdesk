@@ -96,9 +96,15 @@ A domain lives entirely in data and configuration:
   `scripts/build_scenarios.py` materializes the workbooks.
 - **Council personas** (`.codex/agents/`) and the **`yigdesk-council` skill**
   (`.agents/skills/`) — the flagship domain app over `data/scenarios/council_discount`.
-- **Web shell** (`yigdesk/app.py` + `yigdesk/static/`) — a minimal read-only
-  evidence view (health, synthetic-workbook upload, static assets). It owns
-  upload/session binding only; it does not evaluate the model or expose the board.
+- **Web board** (`yigdesk/app.py` + `yigdesk/static/`) — a read + gate view over
+  the same `YIGDESK_SCENARIO` and `YIGDESK_LEDGER` used by MCP. It renders
+  candidates, grounded claims, approvals, and the committed record; its only
+  board writes are `cast_approval` and `request_resolve`. Construction and DTO
+  serialization are shared with MCP through `yigdesk/board.py`.
+
+The existing upload/session binding path is intentionally separate: it verifies
+and preserves a synthetic upload, while the live board continues to price the
+scenario selected by `YIGDESK_SCENARIO`.
 
 ## Op and data model
 
@@ -110,6 +116,11 @@ Every board mutation is one ledger op; state is the fold of those ops.
 - `cast_approval` → an `Approval` (actor, role, verdict, scope).
 - `request_resolve` → a `DecisionRecord`, appended as a `resolved` op, marking the
   decision closed.
+
+Decision ids are single-open and the first committed record is terminal. The
+facade rejects every later mutation under the same ledger transaction; replay also
+ignores invalid late operations from an older log so they cannot erase or alter the
+committed record.
 
 ## Determinism (D1–D4)
 

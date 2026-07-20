@@ -3,6 +3,7 @@ import hashlib
 from decimal import Decimal
 from pathlib import Path
 import openpyxl
+from openpyxl.utils.cell import coordinate_to_tuple
 
 def _read_cell(path, ref: str):
     sheet, addr = ref.split("!", 1)
@@ -29,4 +30,11 @@ class ModelSource:
         return out
 
     def exists(self, ref: str) -> bool:
-        return _read_cell(self.path, ref) is not None
+        try:
+            sheet, addr = ref.split("!", 1)
+            if not sheet or not addr or ":" in addr:
+                return False
+            coordinate_to_tuple(addr)
+            return _read_cell(self.path, ref) is not None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False

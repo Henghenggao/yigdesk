@@ -21,6 +21,13 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+_PRIVATE_ENGINE_NAME = re.compile("yig" + "rid", re.IGNORECASE)
+
+
+def _contains_private_engine_name(path: Path) -> bool:
+    return bool(_PRIVATE_ENGINE_NAME.search(path.name) or _PRIVATE_ENGINE_NAME.search(_text(path)))
+
+
 def test_public_sdk_and_components_remain_domain_neutral():
     forbidden = re.compile(
         r"finance|financial|deal|discount|\barr\b|margin|cogs|cfo|revenue|renewal|northstar|marie|elena",
@@ -113,7 +120,6 @@ def test_private_engine_name_is_absent_from_shipped_surface():
     """Yigdesk is standalone: the private parent engine's name must not appear
     anywhere in the shipped surface. The forbidden token is assembled from a
     split literal so this guard file itself never carries a copy of it."""
-    forbidden = re.compile("yig" + "rid", re.IGNORECASE)
     skip_dirs = {
         ".git",
         "node_modules",
@@ -130,37 +136,36 @@ def test_private_engine_name_is_absent_from_shipped_surface():
     # docs/superpowers/** are internal planning/spec artifacts, not shipped, and
     # legitimately discuss the separation from the private engine.
     superpowers = ROOT / "docs" / "superpowers"
-    surface: list[Path] = [ROOT / "README.md"]
-    surface += [
-        path
-        for path in (ROOT / "yigdesk").rglob("*")
-        if path.is_file()
-        and path.suffix in {".py", ".js", ".html", ".css"}
-        and not _skipped(path)
-    ]
-    surface += [
-        path
-        for path in (ROOT / "docs").rglob("*.md")
-        if superpowers not in path.parents and not _skipped(path)
-    ]
-    surface += [path for path in (ROOT / "tests").rglob("*.py") if not _skipped(path)]
-    # The council Domain App surface (personas, skill, agent contract, notice) is
-    # shipped too and must stay free of the private engine's name.
-    surface += [ROOT / "AGENTS.md", ROOT / "NOTICE"]
-    for config_dir in (ROOT / ".codex", ROOT / ".agents"):
+    suffixes = {".py", ".js", ".ts", ".json", ".md", ".toml", ".yml", ".yaml", ".html", ".css"}
+    surface: list[Path] = []
+    for shipped_dir in ("yigdesk", "scripts", "e2e", "data", "tests", "docs", ".codex", ".agents"):
+        base = ROOT / shipped_dir
         surface += [
-            path
-            for path in config_dir.rglob("*")
+            path for path in base.rglob("*")
             if path.is_file()
-            and path.suffix in {".toml", ".md", ".yaml", ".yml"}
+            and path.suffix.lower() in suffixes
+            and superpowers not in path.parents
             and not _skipped(path)
         ]
+    surface += [
+        ROOT / name for name in (
+            "README.md", "AGENTS.md", "SECURITY.md", "NOTICE", "Dockerfile",
+            "render.yaml", "package.json", "pyproject.toml", "playwright.config.ts",
+        )
+    ]
 
     hits = sorted(
         str(path.relative_to(ROOT))
-        for path in surface
-        if path.exists() and forbidden.search(_text(path))
+        for path in set(surface)
+        if path.exists() and _contains_private_engine_name(path)
     )
     assert not hits, (
         "Private parent-engine name leaked into the shipped surface: " + ", ".join(hits)
     )
+
+
+def test_private_engine_name_guard_detects_a_real_leak(tmp_path):
+    leaked = tmp_path / "package.json"
+    leaked.write_text("yig" + "rid", encoding="utf-8")
+
+    assert _contains_private_engine_name(leaked)

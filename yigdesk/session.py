@@ -30,7 +30,6 @@ class BoundSession:
     directory: Path
     source_path: Path
     projection_path: Path
-    audit_path: Path
     manifest_path: Path
     manifest: dict[str, Any]
 
@@ -115,7 +114,6 @@ def bind_synthetic_session(
                 "session_file": "projection.xlsx",
                 "sha256": projection_fingerprint,
             },
-            "council": {"audit_file": "codex-a2a-audit.jsonl"},
         }
         _write_json(staging / "manifest.json", manifest)
         staging.replace(session_dir)
@@ -152,7 +150,6 @@ def bind_synthetic_session(
         },
         "next": {
             "state": "python -m yigdesk.cli state",
-            "council_audit": str(session_dir / "codex-a2a-audit.jsonl"),
             "evidence_url": "http://127.0.0.1:8787",
         },
     }
@@ -198,20 +195,9 @@ def load_active_session(runtime_root: Path | str) -> BoundSession:
         directory=session_dir,
         source_path=source_path,
         projection_path=projection_path,
-        audit_path=session_dir / "codex-a2a-audit.jsonl",
         manifest_path=manifest_path,
         manifest=manifest,
     )
-
-
-def resolve_council_audit_path(runtime_root: Path | str) -> Path:
-    """Use the active session audit, with a legacy ignored-runtime fallback."""
-
-    runtime_root = Path(runtime_root).expanduser().resolve()
-    try:
-        return load_active_session(runtime_root).audit_path
-    except FileNotFoundError:
-        return runtime_root / "codex-a2a-audit.jsonl"
 
 
 def _new_session_id(source_fingerprint: str) -> str:

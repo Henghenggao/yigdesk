@@ -22,6 +22,23 @@ def test_lists_six_ops_and_prices_candidate(tmp_path):
     assert set(names) == {"open_decision","propose_candidate","post_claim","read_board","cast_approval","request_resolve"}
     assert board["decisions"]["d1"]["candidates"]["c1"]["consequence"]["verdict"] == "ok"
 
+async def _roundtrip_without_scenario_env(ledger):
+    env = {key: value for key, value in os.environ.items() if key != "YIGDESK_SCENARIO"}
+    env["YIGDESK_LEDGER"] = ledger
+    params = StdioServerParameters(command=sys.executable, args=["-m", "yigdesk.blackboard_mcp"], env=env)
+    async with stdio_client(params) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            await s.call_tool("open_decision", {"decision_id":"default-d1","question":"Approve 12%?"})
+            priced = await s.call_tool("propose_candidate", {
+                "decision_id":"default-d1", "candidate_id":"default-c1", "overrides":{"discount":12}})
+            return priced.structuredContent
+
+def test_mcp_uses_packaged_council_scenario_when_env_is_missing(tmp_path):
+    priced = asyncio.run(_roundtrip_without_scenario_env(str(tmp_path/"default.jsonl")))
+    assert priced["candidate_id"] == "default-c1"
+    assert priced["consequence"]["verdict"] == "ok"
+
 async def _open_typed_and_read(ledger, scenario_dir):
     params = StdioServerParameters(command=sys.executable, args=["-m","yigdesk.blackboard_mcp"],
         env={**os.environ, "YIGDESK_LEDGER": ledger, "YIGDESK_SCENARIO": scenario_dir})

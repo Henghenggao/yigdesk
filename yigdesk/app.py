@@ -257,7 +257,7 @@ def create_app(
 
     def _board_or_503():
         try:
-            return build_blackboard_from_env(), None
+            return build_blackboard_from_env(require_scenario=True), None
         except (KeyError, FileNotFoundError):
             return None, (jsonify({"code": "BOARD_NOT_CONFIGURED",
                                    "error": "set YIGDESK_SCENARIO to a built scenario"}), 503)
@@ -289,6 +289,8 @@ def create_app(
         if d is None:
             return jsonify({"code": "UNKNOWN_DECISION", "error": "no such decision"}), 400
         if kind == "cast_approval":
+            if d.resolution is not None:
+                return jsonify({"code": "DECISION_RESOLVED", "error": "resolved decisions are immutable"}), 400
             verdict = payload.get("verdict")
             scope = payload.get("scope")
             role = payload.get("role")
@@ -299,19 +301,29 @@ def create_app(
                 return jsonify({"code": "BAD_ROLE", "error": f"role must be one of {sorted(required_roles)}"}), 400
             selector = d.policy.get("candidate_selector", "human_selected")
             if scope != decision_id:                        # candidate-scoped
-                if scope not in d.candidates:
+                candidate = d.candidates.get(scope)
+                if candidate is None:
                     return jsonify({"code": "UNKNOWN_SCOPE", "error": "scope must be a candidate id or the decision id"}), 400
+                if (verdict == "approve" and selector == "human_selected"
+                        and (candidate.consequence is None or candidate.consequence.verdict != "ok")):
+                    return jsonify({"code": "INELIGIBLE_SCOPE", "error": "approved candidate must pass constraints"}), 400
             elif verdict == "approve" and selector == "human_selected":
                 return jsonify({"code": "SELECTION_REQUIRED", "error": "human_selected requires a candidate scope"}), 400
-            bb.cast_approval(decision_id, verdict, scope, actor="human:web", role=role)
+            try:
+                bb.cast_approval(decision_id, verdict, scope, actor="human:web", role=role)
+            except ValueError:
+                # The decision may have resolved after the projection used for
+                # validation; the core transaction remains authoritative.
+                return jsonify({"code": "DECISION_RESOLVED", "error": "resolved decisions are immutable"}), 400
             return jsonify({"board": board_dict(bb.project()), "result": None})
         # request_resolve (idempotent in core)
-        already = d.resolution is not None
-        result = bb.request_resolve(decision_id, actor="human:web", role="reviewer")
+        result, replayed = bb.request_resolve_with_status(
+            decision_id, actor="human:web", role="reviewer"
+        )
         if isinstance(result, Pending):
             return jsonify({"board": board_dict(bb.project()), "result": {"pending": result.reason}})
         return jsonify({"board": board_dict(bb.project()),
-                        "result": {"record": asdict(result), "replayed": already}})
+                        "result": {"record": asdict(result), "replayed": replayed}})
 
     return app
 

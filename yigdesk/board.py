@@ -10,6 +10,7 @@ from yigdesk.evaluator.expression import ExpressionEvaluator
 from yigdesk.evaluator.model_source import ModelSource
 
 DEFAULT_LEDGER = "runtime/board.jsonl"
+DEFAULT_SCENARIO = "data/scenarios/council_discount"
 
 def build_blackboard(scenario_dir, ledger_path=None) -> Blackboard:
     scn = Path(scenario_dir)
@@ -17,8 +18,11 @@ def build_blackboard(scenario_dir, ledger_path=None) -> Blackboard:
     src = ModelSource(scn / model["workbook"], model["input_refs"])
     return Blackboard(str(ledger_path or DEFAULT_LEDGER), ExpressionEvaluator(model), src)
 
-def build_blackboard_from_env() -> Blackboard:
-    return build_blackboard(os.environ["YIGDESK_SCENARIO"],
+def build_blackboard_from_env(*, require_scenario: bool = False) -> Blackboard:
+    scenario = os.environ.get("YIGDESK_SCENARIO")
+    if require_scenario and not scenario:
+        raise KeyError("YIGDESK_SCENARIO")
+    return build_blackboard(scenario or DEFAULT_SCENARIO,
                             os.environ.get("YIGDESK_LEDGER", DEFAULT_LEDGER))
 
 def decision_dict(d) -> dict[str, Any]:

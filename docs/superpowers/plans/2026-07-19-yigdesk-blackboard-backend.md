@@ -1045,7 +1045,7 @@ def _bb() -> Blackboard:
     return Blackboard(os.environ.get("YIGDESK_LEDGER", "runtime/board.jsonl"),
                       ExpressionEvaluator(model), src)
 
-def _board_dict(bb): 
+def _board_dict(bb):
     b = bb.project()
     return {"decisions": {did: _decision_dict(d) for did, d in b.decisions.items()}}
 

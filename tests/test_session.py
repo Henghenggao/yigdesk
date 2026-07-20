@@ -14,7 +14,6 @@ from yigdesk.importer import WorkbookImportError
 from yigdesk.session import (
     bind_synthetic_session,
     load_active_session,
-    resolve_council_audit_path,
 )
 
 
@@ -39,8 +38,8 @@ def test_bind_creates_an_immutable_session_without_changing_the_source(tmp_path)
     assert bound.source_path.read_bytes() == before == source.read_bytes()
     assert bound.manifest["source"]["extraction"]["revenue_k"] == "14658.2"
     assert bound.manifest["source"]["extraction"]["cogs_k"] == "10031.0"
-    assert resolve_council_audit_path(runtime) == bound.audit_path
-    assert not bound.audit_path.exists()
+    assert "council" not in bound.manifest
+    assert "audit" not in json.dumps(bound.manifest).lower()
 
 
 def test_app_loads_and_refreshes_the_active_bound_session(tmp_path):
@@ -154,4 +153,26 @@ def test_cli_bind_is_an_offline_natural_language_intake_primitive(
     assert payload["status"] == "BOUND"
     assert payload["source"]["source_cell_count"] == 48
     assert payload["decision"]["requested_discount_pct"] == "2"
-    assert payload["next"]["council_audit"].endswith("codex-a2a-audit.jsonl")
+    assert payload["next"]["state"] == "python -m yigdesk.cli state"
+    assert "council_audit" not in payload["next"]
+
+
+def test_cli_state_reports_the_active_bound_session(tmp_path, monkeypatch, capsys):
+    source = generate(tmp_path / "northwind.xlsx")
+    runtime = tmp_path / "runtime"
+    receipt = bind_synthetic_session(
+        source,
+        runtime_root=runtime,
+        requested_discount_pct=Decimal("2"),
+        margin_floor_pct=Decimal("30"),
+    )
+    monkeypatch.setattr(sys, "argv", ["yigdesk.cli", "--runtime", str(runtime), "state"])
+
+    cli.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "BOUND"
+    assert payload["session_id"] == receipt["session_id"]
+    assert payload["revision_id"] == receipt["revision_id"]
+    assert payload["source_fingerprint"] == receipt["source_fingerprint"]
+    assert payload["decision"] == receipt["decision"]
