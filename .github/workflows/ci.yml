@@ -22,7 +22,8 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: pytest
+      - run: python scripts/build_scenarios.py
+      - run: python -m pytest
 
   browser:
     runs-on: ubuntu-24.04
