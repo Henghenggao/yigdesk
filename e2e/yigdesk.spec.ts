@@ -18,12 +18,13 @@ const PYTHON = process.env.YIGDESK_PYTHON || 'python';
 const SCENARIO = process.env.YIGDESK_SCENARIO || path.resolve(ROOT, 'data/scenarios/council_discount');
 const LEDGER = process.env.YIGDESK_LEDGER || path.resolve(ROOT, 'runtime/e2e-board.jsonl');
 
-type SeedMode = 'single' | 'multi' | 'empty';
+type SeedMode = 'single' | 'multi' | 'empty' | 'human';
 
 function seedBoard(mode: SeedMode): void {
   const args = ['-m', 'scripts.seed_board', '--scenario', SCENARIO, '--ledger', LEDGER];
   if (mode === 'multi') args.push('--multi');
   if (mode === 'empty') args.push('--empty');
+  if (mode === 'human') args.push('--human-selected');
   execFileSync(PYTHON, args, { cwd: ROOT, stdio: 'inherit' });
 }
 
@@ -63,6 +64,12 @@ test('single decision auto-selects, prices its candidate, and drives the policy 
   await expect(page.getByTestId('policy-winner')).toContainText('c1');
   await expect(page.getByTestId('authorize-policy')).toBeVisible();
   await expect(page.getByTestId('approve-candidate')).toHaveCount(0);
+
+  // The role choices come from the policy, but the demo boundary is labelled next
+  // to the control: picking a role is local attribution, not proof of identity.
+  const attribution = page.getByTestId('role-attribution-note');
+  await expect(attribution).toBeVisible();
+  await expect(attribution).toContainText('not an authenticated identity');
 
   // Act as cfo and authorize the policy selection (decision-scoped approve).
   await page.getByTestId('role-select').selectOption('cfo');
@@ -113,6 +120,41 @@ test('multiple decisions require an explicit chooser selection before the gate a
   await expect(page.getByTestId('gate-panel')).toBeVisible();
 });
 
+test('a valid ?decision_id deep link selects that decision; an invalid one falls back to the chooser', async ({ page }) => {
+  seedBoard('multi');
+
+  // A valid deep link selects d2 on load even though two decisions are open —
+  // no chooser click — and its gate is immediately live.
+  await page.goto('/?decision_id=d2');
+  const view = page.getByTestId('decision-view');
+  await expect(view).toBeVisible();
+  await expect(view).toHaveAttribute('data-decision-id', 'd2');
+  await expect(view).toContainText('Approve the pilot expansion?');
+  await expect(page.getByTestId('decision-chooser')).toBeVisible();
+  await expect(page.locator('[data-testid="decision-option"][data-decision-id="d2"]'))
+    .toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('gate-panel')).toBeVisible();
+  await expect(page.getByTestId('authorize-policy')).toBeEnabled();
+  await expect(page.getByTestId('resolve')).toBeEnabled();
+
+  // The deep link is one-shot: an explicit later choice outranks it, and a fresh
+  // board fetch (the same render path a background poll takes) keeps that choice.
+  await page.locator('[data-testid="decision-option"][data-decision-id="d1"]').click();
+  await expect(view).toHaveAttribute('data-decision-id', 'd1');
+  await page.getByTestId('refresh').click();
+  await expect(view).toHaveAttribute('data-decision-id', 'd1'); // never snaps back to d2
+
+  // An invalid deep link falls back to the multi-decision rule: explicit choice
+  // required, nothing selected, no gate actions.
+  await page.goto('/?decision_id=nope');
+  await expect(page.getByTestId('decision-chooser')).toBeVisible();
+  await expect(page.getByTestId('decision-option')).toHaveCount(2);
+  await expect(page.getByTestId('decision-view')).toHaveCount(0);
+  await expect(page.getByTestId('gate-panel')).toHaveCount(0);
+  await expect(page.getByTestId('resolve')).toHaveCount(0);
+  await expect(page.getByTestId('authorize-policy')).toHaveCount(0);
+});
+
 test('an empty ledger renders the empty-board state', async ({ page }) => {
   seedBoard('empty');
   await page.goto('/');
@@ -120,4 +162,26 @@ test('an empty ledger renders the empty-board state', async ({ page }) => {
   await expect(page.getByTestId('board-empty')).toBeVisible();
   await expect(page.getByTestId('decision-view')).toHaveCount(0);
   await expect(page.getByTestId('decision-chooser')).toHaveCount(0);
+});
+
+test('human-selected gate disables HOLD approval and renders the committed approval', async ({ page }) => {
+  seedBoard('human');
+  await page.goto('/');
+
+  const eligible = page.locator('[data-testid="approve-candidate"][data-candidate-id="c1"]');
+  const onHold = page.locator('[data-testid="approve-candidate"][data-candidate-id="hold"]');
+  await expect(eligible).toBeEnabled();
+  await expect(onHold).toBeDisabled();
+
+  await page.getByTestId('role-select').selectOption('cfo');
+  await eligible.click();
+  const approval = page.getByTestId('approval');
+  await expect(approval).toContainText('cfo');
+  await expect(approval).toContainText('approve');
+  await expect(approval).toContainText('c1');
+
+  await page.getByTestId('resolve').click();
+  const outcome = page.getByTestId('resolve-outcome');
+  await expect(outcome).toContainText('c1');
+  await expect(outcome).toContainText('human');
 });

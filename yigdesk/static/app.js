@@ -18,6 +18,12 @@ const state = {
 
 let root = null;
 
+// One-shot deep link. `?decision_id=<id>` picks that decision on first load even
+// when several are open. It is consumed the first time the board is non-empty
+// (whether or not it matched) and by any manual choice, so a background poll can
+// never re-apply it over the decision the user later selected.
+const deepLink = { id: null, pending: true };
+
 /* ------------------------------ DOM helper ------------------------------ */
 
 function el(tag, attrs = {}, kids = []) {
@@ -92,16 +98,34 @@ function policyWinner(d, metric) {
 
 /* -------------------------------- render -------------------------------- */
 
+function readDeepLinkId() {
+  try {
+    return new URLSearchParams(window.location.search).get("decision_id");
+  } catch {
+    return null; // no URL parsing available: fall back to the default rules
+  }
+}
+
 function reconcileSelection(list) {
   if (list.length === 0) {
     state.selectedId = null;
-    return;
+    return; // nothing to match against yet; the deep link stays pending
   }
+  const ids = new Set(list.map((d) => d.id));
+
+  if (deepLink.pending) {
+    const target = deepLink.id;
+    deepLink.pending = false; // one shot, whether or not it named a real decision
+    if (target && ids.has(target)) {
+      state.selectedId = target; // valid deep link wins, even with several decisions
+      return;
+    }
+  }
+
   if (list.length === 1) {
     state.selectedId = list[0].id; // exactly one decision auto-selects
     return;
   }
-  const ids = new Set(list.map((d) => d.id));
   if (state.selectedId && !ids.has(state.selectedId)) state.selectedId = null;
   // Otherwise keep the current selection (preserved across polls).
 }
@@ -224,6 +248,7 @@ function renderDecision(d) {
   );
   view.append(renderCandidates(d));
   view.append(renderClaims(d));
+  view.append(renderApprovals(d));
   view.append(renderGate(d));
   return view;
 }
@@ -314,6 +339,30 @@ function renderClaims(d) {
   return wrap;
 }
 
+function renderApprovals(d) {
+  const approvals = d.approvals || [];
+  const wrap = el("div", { class: "claim-list" });
+  wrap.append(
+    el("div", { class: "evidence-header" }, [el("span", { text: "Approvals" })]),
+  );
+  if (approvals.length === 0) {
+    wrap.append(el("p", { class: "board-hint", text: "No approvals recorded." }));
+    return wrap;
+  }
+  for (const approval of approvals) {
+    wrap.append(
+      el("div", { "data-testid": "approval", class: "claim" }, [
+        el("span", { class: "scope-chip", text: approval.verdict }),
+        el("p", {
+          class: "claim-body",
+          text: `${approval.role || "unattributed"} · ${approval.scope}`,
+        }),
+      ]),
+    );
+  }
+  return wrap;
+}
+
 /* --------------------------------- gate --------------------------------- */
 
 function renderGate(d) {
@@ -370,9 +419,20 @@ function renderRoleSelect(d) {
     select.append(el("option", { value: r, text: r || "(no attributed role)" }));
   }
   select.value = state.role;
-  return el("label", { class: "role-field" }, [
-    el("span", { class: "evidence-label", text: "Acting as" }),
-    select,
+  // The role choices come from the policy, but picking one is local attribution
+  // only — nothing here proves who the operator is. Say so next to the control.
+  return el("div", { class: "role-field" }, [
+    el("label", { class: "role-field-label" }, [
+      el("span", { class: "evidence-label", text: "Acting as" }),
+      select,
+    ]),
+    el("small", {
+      "data-testid": "role-attribution-note",
+      class: "gate-note",
+      text:
+        "Demo boundary: the role is local attribution recorded with your action, " +
+        "not an authenticated identity. Anyone using this board can pick any role.",
+    }),
   ]);
 }
 
@@ -394,7 +454,7 @@ function renderHumanSelectControls(d, resolved) {
             "data-candidate-id": c.id,
             type: "button",
             class: "upload-action",
-            disabled: resolved,
+            disabled: resolved || !eligible,
             onClick: () => onApprove(d.id, c.id),
           },
           [
@@ -505,6 +565,7 @@ function renderOutcome(d) {
 
 function onSelectDecision(id) {
   state.selectedId = id;
+  deepLink.pending = false; // an explicit choice always outranks the URL parameter
   state.error = null;
   render();
 }
@@ -571,6 +632,7 @@ async function pollBoard() {
 async function init() {
   root = document.querySelector('[data-testid="board-root"]');
   if (!root) return;
+  deepLink.id = readDeepLinkId(); // read once, at load; later polls never re-read it
   try {
     state.board = await session.getBoard();
   } catch (err) {
