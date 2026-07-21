@@ -1,30 +1,12 @@
-// Yigdesk board view + selector-aware human gate.
-// Renders the deterministic board projection and lets a human drive the two
-// gate ops (cast approval, request resolve) through the BoardSession client.
-// All domain labels (questions, metric labels, roles) come from board data;
-// this file holds no business vocabulary of its own.
+// Manifest renderer for a focused decision surface. Every string arrives as data
+// and is inserted with textContent; no agent payload can execute in this page.
 import { BoardSession } from "/session.js";
 
 const session = new BoardSession();
 const POLL_MS = 4000;
-
-const state = {
-  board: { decisions: {} },
-  selectedId: null,
-  role: null,
-  outcomes: {}, // decisionId -> { pending } | { record, replayed }
-  error: null,
-};
-
+const ACTION_VERSION = "yigdesk-agent-action/v1";
+const state = { manifest: { decisions: [] }, selectedId: null, role: null, notice: null, error: null };
 let root = null;
-
-// One-shot deep link. `?decision_id=<id>` picks that decision on first load even
-// when several are open. It is consumed the first time the board is non-empty
-// (whether or not it matched) and by any manual choice, so a background poll can
-// never re-apply it over the decision the user later selected.
-const deepLink = { id: null, pending: true };
-
-/* ------------------------------ DOM helper ------------------------------ */
 
 function el(tag, attrs = {}, kids = []) {
   const node = document.createElement(tag);
@@ -33,617 +15,136 @@ function el(tag, attrs = {}, kids = []) {
     if (key === "text") node.textContent = value;
     else if (key === "class") node.className = value;
     else if (key === "onClick") node.addEventListener("click", value);
-    else if (key === "onChange") node.addEventListener("change", value);
     else node.setAttribute(key, value === true ? "" : String(value));
   }
-  for (const kid of Array.isArray(kids) ? kids : [kids]) {
-    if (kid === null || kid === undefined || kid === false) continue;
-    node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  }
+  for (const kid of Array.isArray(kids) ? kids : [kids]) if (kid !== null && kid !== undefined && kid !== false) node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
   return node;
 }
 
-/* ------------------------------ selectors ------------------------------- */
-
-function decisions() {
-  return (state.board && state.board.decisions) || {};
+function decisions() { return state.manifest.decisions || []; }
+function selected() { return decisions().find((d) => d.id === state.selectedId) || null; }
+function selectDefault() {
+  const list = decisions();
+  if (list.length === 1) state.selectedId = list[0].id;
+  else if (state.selectedId && !list.some((d) => d.id === state.selectedId)) state.selectedId = null;
 }
-
-function decisionList() {
-  return Object.values(decisions());
-}
-
-function requiredRoles(d) {
-  return [...new Set((d.policy?.required_approvals || []).map((a) => a.role))];
-}
-
-function isResolved(d) {
-  return (
-    d.status === "resolved" ||
-    Boolean(d.resolution) ||
-    Boolean(state.outcomes[d.id]?.record)
-  );
-}
-
-function findMetric(candidate, id) {
-  return (candidate.consequence?.metrics || []).find((m) => m.id === id) || null;
-}
-
-function metricNumber(candidate, id) {
-  const m = findMetric(candidate, id);
-  if (!m || m.after === null || m.after === undefined) return null;
-  const n = Number(m.after);
-  return Number.isNaN(n) ? null : n;
-}
-
-// Mirror the backend "max:<metric>" selector: eligible candidates are those
-// whose consequence verdict is "ok"; the winner has the greatest metric.after,
-// breaking ties on the greater candidate id.
-function policyWinner(d, metric) {
-  let best = null;
-  for (const c of Object.values(d.candidates || {})) {
-    if (!c.consequence || c.consequence.verdict !== "ok") continue;
-    const value = metricNumber(c, metric);
-    if (value === null) continue;
-    if (
-      best === null ||
-      value > best.value ||
-      (value === best.value && c.id > best.candidate.id)
-    ) {
-      best = { candidate: c, value };
-    }
-  }
-  return best ? best.candidate : null;
-}
-
-/* -------------------------------- render -------------------------------- */
-
-function readDeepLinkId() {
-  try {
-    return new URLSearchParams(window.location.search).get("decision_id");
-  } catch {
-    return null; // no URL parsing available: fall back to the default rules
-  }
-}
-
-function reconcileSelection(list) {
-  if (list.length === 0) {
-    state.selectedId = null;
-    return; // nothing to match against yet; the deep link stays pending
-  }
-  const ids = new Set(list.map((d) => d.id));
-
-  if (deepLink.pending) {
-    const target = deepLink.id;
-    deepLink.pending = false; // one shot, whether or not it named a real decision
-    if (target && ids.has(target)) {
-      state.selectedId = target; // valid deep link wins, even with several decisions
-      return;
-    }
-  }
-
-  if (list.length === 1) {
-    state.selectedId = list[0].id; // exactly one decision auto-selects
-    return;
-  }
-  if (state.selectedId && !ids.has(state.selectedId)) state.selectedId = null;
-  // Otherwise keep the current selection (preserved across polls).
+function format(value, unit = "") {
+  if (value === null || value === undefined) return "—";
+  const n = Number(value);
+  if (Number.isNaN(n)) return String(value);
+  return `${n.toFixed(2)}${unit === "pt" ? " pt" : unit === "%" ? "%" : ""}`;
 }
 
 function render() {
   if (!root) return;
-  const list = decisionList();
-  reconcileSelection(list);
-
-  root.replaceChildren(renderToolbar(), renderError());
-
-  if (list.length === 0) {
-    root.append(
-      el("div", { "data-testid": "board-empty", class: "decision-empty" }, [
-        el("h3", { text: "No decisions on the board" }),
-        el("p", {
-          text: "Nothing has been proposed yet. Refresh once a decision is opened.",
-        }),
-      ]),
-    );
+  selectDefault();
+  root.replaceChildren(renderToolbar(), renderMessage());
+  if (!decisions().length) {
+    root.append(el("section", { class: "decision-empty", "data-testid": "board-empty" }, [el("h2", { text: "No decision is ready for review" }), el("p", { text: "The workbench will update when an agent opens a decision." })]));
     return;
   }
-
-  if (list.length > 1) root.append(renderChooser(list));
-
-  const selected = state.selectedId ? decisions()[state.selectedId] : null;
-  if (!selected) {
-    root.append(
-      el("p", {
-        class: "board-hint",
-        text: "Choose a decision above to review its candidates and drive the gate.",
-      }),
-    );
-    return;
-  }
-  root.append(renderDecision(selected));
+  if (decisions().length > 1) root.append(renderHistory());
+  const decision = selected();
+  if (!decision) { root.append(el("p", { class: "board-hint", text: "Choose a decision from history to focus the workbench." })); return; }
+  root.append(renderDecision(decision));
 }
 
 function renderToolbar() {
-  return el("div", { class: "board-toolbar" }, [
-    el(
-      "button",
-      {
-        "data-testid": "refresh",
-        type: "button",
-        class: "upload-action",
-        onClick: onRefresh,
-      },
-      [
-        el("span", { text: "Refresh board" }),
-        el("span", { "aria-hidden": "true", text: "↻" }),
-      ],
-    ),
-  ]);
+  const version = (state.manifest.version || "decision view").split("/").at(-1);
+  return el("div", { class: "board-toolbar" }, [el("span", { class: "manifest-tag" }, [el("i", { "aria-hidden": "true" }), `Live decision manifest · ${version}`]), el("button", { type: "button", class: "quiet-action", "data-testid": "refresh", onClick: refresh, text: "Refresh view" })]);
 }
-
-function renderError() {
-  const box = el("p", {
-    "data-testid": "error",
-    class: "upload-status",
-    "data-state": "error",
-    role: "alert",
-    "aria-live": "assertive",
-  });
-  if (state.error) box.textContent = state.error;
+function renderMessage() {
+  const box = el("div", { class: "workbench-message", role: "status", "aria-live": "polite", "data-testid": "action-status" });
+  if (state.error) { box.classList.add("is-error"); box.textContent = state.error; }
+  else if (state.notice) box.textContent = state.notice;
   else box.hidden = true;
   return box;
 }
-
-function renderChooser(list) {
-  const chooser = el("div", {
-    "data-testid": "decision-chooser",
-    class: "scenario-switch",
-    role: "group",
-    "aria-label": "Open decisions",
-  });
-  for (const d of list) {
-    const active = d.id === state.selectedId;
-    chooser.append(
-      el(
-        "button",
-        {
-          "data-testid": "decision-option",
-          "data-decision-id": d.id,
-          type: "button",
-          class: "scenario-button" + (active ? " is-active" : ""),
-          "aria-pressed": String(active),
-          onClick: () => onSelectDecision(d.id),
-        },
-        [
-          el("span", {}, [
-            el("strong", { text: d.question || d.id }),
-            el("small", { text: `${d.decision_type} · ${d.status}` }),
-          ]),
-        ],
-      ),
-    );
-  }
-  return chooser;
+function renderHistory() {
+  return el("nav", { class: "decision-history", "data-testid": "decision-chooser", "aria-label": "Decision history" }, decisions().map((d) => el("button", { type: "button", class: d.id === state.selectedId ? "history-item active" : "history-item", "data-testid": "decision-option", "data-decision-id": d.id, "aria-pressed": String(d.id === state.selectedId), onClick: () => { state.selectedId = d.id; render(); } }, [el("strong", { text: d.title }), el("small", { text: d.status })])));
 }
-
-function renderDecision(d) {
-  const view = el("section", {
-    "data-testid": "decision-view",
-    "data-decision-id": d.id,
-    class: "panel decision-panel",
-  });
-  view.append(
-    el("header", { class: "panel-heading" }, [
-      el("div", {}, [
-        el("p", { class: "eyebrow", text: d.decision_type }),
-        el("h2", { text: d.question || d.id }),
-      ]),
-      el("span", {
-        class: "disk-state",
-        "data-decision-status": d.status,
-        text: d.status,
-      }),
-    ]),
-  );
-  view.append(renderCandidates(d));
-  view.append(renderClaims(d));
-  view.append(renderApprovals(d));
-  view.append(renderGate(d));
+function block(decision, type) { return decision.blocks.find((b) => b.type === type); }
+function renderDecision(decision) {
+  const view = el("article", { class: "focused-decision", "data-testid": "decision-view", "data-decision-id": decision.id });
+  view.append(el("header", { class: "decision-hero" }, [el("p", { class: "eyebrow", text: "Decision workbench" }), el("div", { class: "hero-title" }, [el("h1", { text: decision.title }), el("span", { class: `disk-state ${decision.status}`, text: decision.status.replaceAll("_", " ") })]), el("p", { class: "executive-conclusion", "data-testid": "executive-conclusion", text: decision.conclusion })]));
+  view.append(renderComparison(block(decision, "comparison")));
+  view.append(renderProof(block(decision, "proof")));
+  view.append(renderEvidence(block(decision, "evidence"), block(decision, "warning")));
+  view.append(renderActions(decision, block(decision, "actions")));
   return view;
 }
-
-function renderCandidates(d) {
-  const cands = Object.values(d.candidates || {});
-  const wrap = el("div", { class: "candidate-list" });
-  wrap.append(
-    el("div", { class: "evidence-header" }, [
-      el("span", { text: "Candidates" }),
-      el("span", { text: `${cands.length} priced` }),
-    ]),
-  );
-  if (cands.length === 0) {
-    wrap.append(el("p", { class: "board-hint", text: "No candidates proposed." }));
-    return wrap;
-  }
-  for (const c of cands) wrap.append(renderCandidate(c));
-  return wrap;
+function renderComparison(block) {
+  const section = el("section", { class: "comparison-section", "data-testid": "candidate-comparison" }, [el("h2", { text: block.title })]);
+  const table = el("table", { class: "comparison-table" });
+  table.append(el("thead", {}, el("tr", {}, [el("th", { text: "Candidate" }), el("th", { text: "Gross margin" }), el("th", { text: "Headroom" }), el("th", { text: "Status" })])));
+  const body = el("tbody");
+  for (const candidate of block.candidates) body.append(el("tr", { "data-testid": "candidate", "data-candidate-id": candidate.id, "data-verdict": candidate.verdict }, [el("th", { scope: "row" }, el("span", { class: "candidate-identity" }, [el("strong", { text: candidate.name }), el("small", { text: candidate.label })])), el("td", { "data-label": "Gross margin", text: format(candidate.gross_margin, "%") }), el("td", { "data-label": "Headroom", text: format(candidate.headroom, "pt") }), el("td", { "data-label": "Status" }, el("span", { class: `verdict ${candidate.verdict}`, text: candidate.verdict === "ok" ? "Eligible" : "Hold" }))]));
+  table.append(body); section.append(table); return section;
 }
-
-function renderCandidate(c) {
-  const verdict = c.consequence ? c.consequence.verdict : "hold";
-  const tone = verdict === "ok" ? "ready" : "hold";
-  const card = el("article", {
-    "data-testid": "candidate",
-    "data-candidate-id": c.id,
-    class: "candidate",
-    "data-verdict": verdict,
-  });
-  card.append(
-    el("div", { class: "candidate-head" }, [
-      el("div", {}, [
-        el("strong", { text: c.id }),
-        c.author ? el("small", { text: ` · ${c.author}` }) : null,
-      ]),
-      el("span", { class: `verdict ${tone}`, text: verdict }),
-    ]),
-  );
-
-  const metrics = c.consequence?.metrics || [];
-  if (metrics.length) {
-    const grid = el("div", { class: "metrics" });
-    for (const m of metrics) {
-      grid.append(
-        el("div", { class: "metric" }, [
-          el("span", { text: m.label }),
-          el("strong", {
-            text: m.value === null || m.value === undefined ? "—" : String(m.value),
-          }),
-          el("small", { text: m.unit || "" }),
-        ]),
-      );
-    }
-    card.append(grid);
-  }
-
-  const refs = c.consequence?.evidence_refs || [];
-  if (refs.length) {
-    card.append(
-      el("div", { class: "candidate-evidence" }, [
-        el("span", { class: "evidence-label", text: "Evidence: " }),
-        ...refs.map((r) => el("code", { text: r })),
-      ]),
-    );
-  }
-  return card;
+function compactId(value) {
+  if (!value) return "Pending commit";
+  const text = String(value);
+  return text.length > 24 ? `${text.slice(0, 14)}…${text.slice(-6)}` : text;
 }
-
-function renderClaims(d) {
-  const claims = Object.values(d.claims || {});
-  const wrap = el("div", { class: "claim-list" });
-  wrap.append(
-    el("div", { class: "evidence-header" }, [el("span", { text: "Grounded claims" })]),
-  );
-  if (claims.length === 0) {
-    wrap.append(el("p", { class: "board-hint", text: "No grounded claims." }));
-    return wrap;
+function renderProof(proof) {
+  const section = el("section", { class: "decision-proof", "data-testid": "decision-proof", "aria-label": "Decision proof" });
+  section.append(el("div", { class: "proof-heading" }, [el("div", {}, [el("p", { class: "eyebrow", text: "Different perspectives. One measurable truth." }), el("h2", { text: proof.title })]), el("p", { class: "proof-summary", text: proof.summary })]));
+  const track = el("ol", { class: "proof-track" });
+  for (const item of proof.items) {
+    track.append(el("li", { class: `proof-step ${item.status}`, "data-testid": `proof-${item.id}`, "data-proof-status": item.status }, [el("span", { class: "proof-marker", "aria-hidden": "true" }), el("div", { class: "proof-copy" }, [el("span", { class: "proof-status", text: item.status }), el("strong", { text: item.label }), el("small", { text: item.detail })])]));
   }
-  for (const cl of claims) {
-    wrap.append(
-      el("div", { "data-testid": "claim", class: "claim" }, [
-        el("span", { class: "scope-chip", text: cl.type }),
-        el("p", { class: "claim-body", text: cl.body }),
-      ]),
-    );
-  }
-  return wrap;
+  section.append(track);
+  const record = proof.record;
+  section.append(el("dl", { class: "proof-record", "data-testid": "proof-record" }, [
+    el("div", {}, [el("dt", { text: "Source fingerprint" }), el("dd", { title: record.source_fingerprint || "", text: compactId(record.source_fingerprint) })]),
+    el("div", {}, [el("dt", { text: "Evaluator revision" }), el("dd", { title: record.evaluator_revision || "", text: compactId(record.evaluator_revision) })]),
+    el("div", {}, [el("dt", { text: "Input cutoff" }), el("dd", { text: record.cutoff_seq === null ? "Collecting" : `#${record.cutoff_seq}` })]),
+    el("div", {}, [el("dt", { text: "Ledger sequence" }), el("dd", { text: record.ledger_seq === null ? "Not committed" : `#${record.ledger_seq}` })]),
+    el("div", {}, [el("dt", { text: "Closed by" }), el("dd", { text: record.closed_by || "Pending" })]),
+    el("div", {}, [el("dt", { text: "Agent provenance" }), el("dd", { text: record.agent_count ? `${record.agent_count} declared` : "Not declared" })]),
+  ]));
+  return section;
 }
-
-function renderApprovals(d) {
-  const approvals = d.approvals || [];
-  const wrap = el("div", { class: "claim-list" });
-  wrap.append(
-    el("div", { class: "evidence-header" }, [el("span", { text: "Approvals" })]),
-  );
-  if (approvals.length === 0) {
-    wrap.append(el("p", { class: "board-hint", text: "No approvals recorded." }));
-    return wrap;
-  }
-  for (const approval of approvals) {
-    wrap.append(
-      el("div", { "data-testid": "approval", class: "claim" }, [
-        el("span", { class: "scope-chip", text: approval.verdict }),
-        el("p", {
-          class: "claim-body",
-          text: `${approval.role || "unattributed"} · ${approval.scope}`,
-        }),
-      ]),
-    );
-  }
-  return wrap;
+function renderEvidence(evidence, warning) {
+  const section = el("section", { class: "evidence-section" }, [el("div", {}, [el("p", { class: "eyebrow", text: evidence.title }), ...evidence.items.map((item) => el("div", { class: "evidence-item", "data-testid": "claim" }, [el("strong", { text: item.type || "evidence" }), el("p", { text: item.body }), el("small", { text: (item.refs || []).join(" · ") })]))]), el("aside", { class: "risk-boundary", "data-testid": "risk-boundary" }, [el("p", { class: "eyebrow", text: warning.title }), el("p", { text: warning.body }), el("small", { text: (warning.refs || []).join(" · ") })])]);
+  return section;
 }
-
-/* --------------------------------- gate --------------------------------- */
-
-function renderGate(d) {
-  const resolved = isResolved(d);
-  const selector = d.policy?.candidate_selector || "human_selected";
-  const gate = el("section", { "data-testid": "gate-panel", class: "gate-panel" });
-  gate.append(
-    el("div", { class: "evidence-header" }, [
-      el("span", { text: "Human gate" }),
-      el("span", { text: selector }),
-    ]),
-  );
-  gate.append(renderRoleSelect(d));
-  gate.append(
-    selector.startsWith("max:")
-      ? renderPolicyControls(d, selector.slice(4), resolved)
-      : renderHumanSelectControls(d, resolved),
-  );
-  gate.append(
-    el(
-      "button",
-      {
-        "data-testid": "resolve",
-        type: "button",
-        class: "primary-action",
-        disabled: resolved,
-        onClick: () => onResolve(d.id),
-      },
-      [
-        el("span", {
-          class: "action-label",
-          text: resolved ? "Decision resolved" : "Resolve decision",
-        }),
-      ],
-    ),
-  );
-  gate.append(renderOutcome(d));
-  return gate;
-}
-
-function renderRoleSelect(d) {
-  const roles = requiredRoles(d);
-  const options = roles.length ? roles : [""];
-  if (!options.includes(state.role)) state.role = options[0];
-  const select = el("select", {
-    "data-testid": "role-select",
-    class: "role-select",
-    "aria-label": "Acting role",
-    onChange: (event) => {
-      state.role = event.target.value;
-    },
-  });
-  for (const r of options) {
-    select.append(el("option", { value: r, text: r || "(no attributed role)" }));
+function renderActions(decision, actions) {
+  const section = el("section", { class: "human-gate", "data-testid": "gate-panel" }, [el("div", { class: "gate-title" }, [el("div", {}, [el("p", { class: "eyebrow", text: "Human checkpoint" }), el("h2", { text: actions.title })]), el("p", { text: "Your intent is written to the append-only ledger. Identity is declared locally in this public demo." })])]);
+  state.role = actions.role || state.role || "reviewer";
+  const role = el("select", { class: "role-select", "data-testid": "role-select", "aria-label": "Acting role" }, [el("option", { value: state.role, text: state.role })]);
+  section.append(role);
+  const list = el("div", { class: "context-actions" });
+  for (const action of actions.items) {
+    const testId = action.action_type === "resolve" ? "resolve" : action.action_type === "approve_candidate" ? "approve-candidate" : action.action_type;
+    const primary = action.action_type === "resolve" || action.action_type === "approve_candidate";
+    list.append(el("div", { class: "context-action" }, [el("button", { type: "button", class: primary ? "primary-action" : "secondary-action", "data-testid": testId, "data-candidate-id": action.candidate_id, disabled: !action.enabled, onClick: () => runAction(decision.id, action), text: action.label })]));
   }
-  select.value = state.role;
-  // The role choices come from the policy, but picking one is local attribution
-  // only — nothing here proves who the operator is. Say so next to the control.
-  return el("div", { class: "role-field" }, [
-    el("label", { class: "role-field-label" }, [
-      el("span", { class: "evidence-label", text: "Acting as" }),
-      select,
-    ]),
-    el("small", {
-      "data-testid": "role-attribution-note",
-      class: "gate-note",
-      text:
-        "Demo boundary: the role is local attribution recorded with your action, " +
-        "not an authenticated identity. Anyone using this board can pick any role.",
-    }),
-  ]);
+  const reasons = [...new Set(actions.items.filter((action) => !action.enabled && action.reason).map((action) => action.reason))];
+  section.append(list);
+  if (reasons.length) section.append(el("p", { class: "gate-note", text: reasons.join(" ") }));
+  return section;
 }
-
-function renderHumanSelectControls(d, resolved) {
-  const cands = Object.values(d.candidates || {});
-  const wrap = el("div", { class: "gate-actions" });
-  if (cands.length === 0) {
-    wrap.append(el("p", { class: "board-hint", text: "No candidates to approve." }));
-    return wrap;
-  }
-  for (const c of cands) {
-    const eligible = Boolean(c.consequence && c.consequence.verdict === "ok");
-    wrap.append(
-      el("div", { class: "gate-row" }, [
-        el(
-          "button",
-          {
-            "data-testid": "approve-candidate",
-            "data-candidate-id": c.id,
-            type: "button",
-            class: "upload-action",
-            disabled: resolved || !eligible,
-            onClick: () => onApprove(d.id, c.id),
-          },
-          [
-            el("span", { text: `Approve ${c.id}` }),
-            el("span", { "aria-hidden": "true", text: "→" }),
-          ],
-        ),
-        el("button", {
-          "data-testid": "hold-candidate",
-          "data-candidate-id": c.id,
-          type: "button",
-          class: "ghost-button",
-          disabled: resolved,
-          onClick: () => onHold(d.id, c.id),
-          text: "Hold",
-        }),
-        el("small", { class: "gate-note", text: eligible ? "eligible" : "on hold" }),
-      ]),
-    );
-  }
-  return wrap;
-}
-
-function renderPolicyControls(d, metric, resolved) {
-  const winner = policyWinner(d, metric);
-  const wrap = el("div", { class: "gate-actions" });
-
-  const winnerBox = el("div", { "data-testid": "policy-winner", class: "hero-proof" });
-  winnerBox.append(el("span", { text: `Policy selector · max:${metric}` }));
-  if (winner) {
-    const m = findMetric(winner, metric);
-    const detail = m ? `${m.value ?? "—"} ${m.unit || ""}`.trim() : "";
-    winnerBox.append(el("strong", { text: winner.id }));
-    winnerBox.append(el("small", { text: detail ? `${metric} ${detail}` : metric }));
-  } else {
-    winnerBox.append(el("strong", { text: "No eligible candidate" }));
-  }
-  wrap.append(winnerBox);
-
-  wrap.append(
-    el("div", { class: "gate-row" }, [
-      el(
-        "button",
-        {
-          "data-testid": "authorize-policy",
-          type: "button",
-          class: "upload-action",
-          disabled: resolved,
-          onClick: () => onApprove(d.id, d.id), // decision-scoped approve
-        },
-        [
-          el("span", { text: "Authorize policy selection" }),
-          el("span", { "aria-hidden": "true", text: "→" }),
-        ],
-      ),
-      el("button", {
-        "data-testid": "hold-policy",
-        type: "button",
-        class: "ghost-button",
-        disabled: resolved,
-        onClick: () => onHold(d.id, d.id),
-        text: "Hold",
-      }),
-    ]),
-  );
-  return wrap;
-}
-
-function renderOutcome(d) {
-  const box = el("div", {
-    "data-testid": "resolve-outcome",
-    class: "resolve-outcome",
-    role: "status",
-    "aria-live": "polite",
-  });
-  const outcome = state.outcomes[d.id] || {};
-  const record = d.resolution || outcome.record || null;
-  const pending = outcome.pending || null;
-
-  if (record) {
-    box.setAttribute("data-outcome", "committed");
-    box.append(el("p", { class: "outcome-line", text: "Decision resolved." }));
-    box.append(
-      el("dl", { class: "outcome-record" }, [
-        el("dt", { text: "Chosen candidate" }),
-        el("dd", { text: record.chosen_candidate_id }),
-        el("dt", { text: "Closed by" }),
-        el("dd", { text: record.closed_by }),
-      ]),
-    );
-    if (record.rationale) {
-      box.append(el("p", { class: "outcome-rationale", text: record.rationale }));
-    }
-    if (outcome.replayed) {
-      box.append(el("small", { class: "gate-note", text: "replayed (idempotent)" }));
-    }
-  } else if (pending) {
-    box.setAttribute("data-outcome", "pending");
-    box.append(el("p", { class: "outcome-line", text: "Not resolved yet." }));
-    box.append(el("p", { class: "outcome-reason", text: pending }));
-  } else {
-    box.hidden = true;
-  }
-  return box;
-}
-
-/* ------------------------------ controller ------------------------------ */
-
-function onSelectDecision(id) {
-  state.selectedId = id;
-  deepLink.pending = false; // an explicit choice always outranks the URL parameter
-  state.error = null;
-  render();
-}
-
-async function onRefresh() {
+function id() { return window.crypto?.randomUUID?.() || `action-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+async function runAction(decisionId, action) {
   try {
     state.error = null;
-    state.board = await session.getBoard();
-  } catch (err) {
-    state.error = errorText(err);
-  }
-  render();
+    const actionId = id();
+    const verdict = action.action_type === "approve_candidate" ? "approve" : action.action_type === "hold" ? "hold" : action.action_type === "request_revision" ? "reject" : undefined;
+    const response = await session.sendAction({ version: ACTION_VERSION, action_id: actionId, correlation_id: actionId, decision_id: decisionId, action_type: action.action_type, candidate_id: action.candidate_id, human: { role: state.role, ...(verdict ? { verdict } : {}) } });
+    state.notice = response.result?.record
+      ? `Resolved as ${response.result.record.chosen_candidate_id}.`
+      : response.result?.pending
+        ? `Not resolved: ${response.result.pending}.`
+        : action.action_type === "approve_candidate"
+          ? "Approval recorded. Waiting for Codex to run the deterministic gate."
+          : action.action_type === "hold"
+            ? "Hold recorded. No further execution will run."
+            : "Revision request recorded for the active Codex task.";
+    await refresh(false);
+  } catch (error) { state.error = error?.message || String(error); render(); }
 }
-
-function onApprove(decisionId, scope) {
-  return runOp(decisionId, false, () =>
-    session.castApproval(decisionId, { verdict: "approve", scope, role: state.role }),
-  );
-}
-
-function onHold(decisionId, scope) {
-  return runOp(decisionId, false, () =>
-    session.castApproval(decisionId, { verdict: "hold", scope, role: state.role }),
-  );
-}
-
-function onResolve(decisionId) {
-  return runOp(decisionId, true, () => session.requestResolve(decisionId));
-}
-
-async function runOp(decisionId, isResolve, fn) {
-  try {
-    state.error = null;
-    const res = await fn();
-    if (res && res.board) state.board = res.board;
-    if (isResolve) state.outcomes[decisionId] = (res && res.result) || {};
-    else delete state.outcomes[decisionId]; // gate state changed; drop stale pending
-  } catch (err) {
-    state.error = errorText(err);
-  }
-  render();
-}
-
-function errorText(err) {
-  return err && err.message ? err.message : String(err);
-}
-
-/* --------------------------------- boot --------------------------------- */
-
-async function pollBoard() {
-  try {
-    const board = await session.getBoard();
-    // Re-render only on real change; selection is preserved by reconcileSelection.
-    if (JSON.stringify(board) !== JSON.stringify(state.board)) {
-      state.board = board;
-      render();
-    }
-  } catch (err) {
-    // Background poll: stay quiet and keep the last good render.
-    console.error(err);
-  }
-}
-
-async function init() {
-  root = document.querySelector('[data-testid="board-root"]');
-  if (!root) return;
-  deepLink.id = readDeepLinkId(); // read once, at load; later polls never re-read it
-  try {
-    state.board = await session.getBoard();
-  } catch (err) {
-    state.error = errorText(err);
-  }
-  render();
-  window.setInterval(pollBoard, POLL_MS);
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", init);
-} else {
-  init();
-}
+async function refresh(clear = true) { try { if (clear) { state.error = null; state.notice = null; } state.manifest = await session.getDecisionView(); } catch (error) { state.error = error?.message || String(error); } render(); }
+async function poll() { try { const next = await session.getDecisionView(); if (JSON.stringify(next) !== JSON.stringify(state.manifest)) { state.manifest = next; render(); } } catch { /* retain last useful view */ } }
+function init() { root = document.querySelector('[data-testid="board-root"]'); refresh(); window.setInterval(poll, POLL_MS); }
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();

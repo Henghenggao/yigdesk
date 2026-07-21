@@ -1,5 +1,5 @@
-// Thin client for the deterministic board surface. Domain-neutral: no business terms.
-// Reads the board projection and posts the two human ops (cast_approval, request_resolve).
+// Thin client for the deterministic board surface. It consumes trusted manifests
+// and sends typed human intent through the local adapter, never raw board ops.
 export class BoardSession {
   constructor(baseUrl = "") {
     this.baseUrl = baseUrl.replace(/\/$/, "");
@@ -17,23 +17,15 @@ export class BoardSession {
     return data;
   }
 
-  getBoard() {
-    return this.#json("/api/board");
+  getDecisionView() {
+    return this.#json("/api/decision-view");
   }
 
-  #op(decisionId, kind, payload) {
-    return this.#json("/api/board/op", {
+  sendAction(action) {
+    return this.#json("/api/agent-actions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ decision_id: decisionId, kind, payload }),
+      body: JSON.stringify(action),
     });
-  }
-
-  castApproval(decisionId, { verdict, scope, role }) {
-    return this.#op(decisionId, "cast_approval", { verdict, scope, role });
-  }
-
-  requestResolve(decisionId) {
-    return this.#op(decisionId, "request_resolve", {});
   }
 }

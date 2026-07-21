@@ -1,0 +1,29 @@
+{
+  "name": "yigdesk",
+  "version": "0.2.0",
+  "description": "Run deterministic, evidence-grounded decision councils from Codex.",
+  "author": {
+    "name": "Yigdesk contributors",
+    "url": "https://github.com/Henghenggao/yigdesk"
+  },
+  "homepage": "https://github.com/Henghenggao/yigdesk",
+  "repository": "https://github.com/Henghenggao/yigdesk",
+  "license": "Apache-2.0",
+  "keywords": ["decision", "blackboard", "mcp", "codex"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Yigdesk",
+    "shortDescription": "Grounded decision councils with a live human gate.",
+    "longDescription": "Yigdesk gives Codex a six-operation deterministic blackboard, three parallel specialists plus a grounded non-binding optimizer, and a local visual human approval surface backed by an append-only ledger.",
+    "developerName": "Yigdesk contributors",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "MCP"],
+    "websiteURL": "https://github.com/Henghenggao/yigdesk",
+    "defaultPrompt": [
+      "Run the fast Northwind council and show the live board.",
+      "Continue this Yigdesk decision after my approval."
+    ],
+    "brandColor": "#154D40"
+  },
+  "mcpServers": "./.mcp.json"
+}

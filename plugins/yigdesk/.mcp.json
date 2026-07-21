@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "yigdesk": {
+      "command": "python",
+      "args": ["-m", "yigdesk.blackboard_mcp"],
+      "env_vars": ["YIGDESK_SCENARIO", "YIGDESK_LEDGER", "YIGDESK_AGENT_RUN_ID"],
+      "env": {
+        "YIGDESK_AGENT_ID": "orchestrator",
+        "YIGDESK_AGENT_PROFILE": "plugin_orchestrator",
+        "YIGDESK_AGENT_MODEL": "codex-runtime",
+        "YIGDESK_PROMPT_REVISION": "plugin-entry-v1",
+        "YIGDESK_SKILLS_REVISION": "yigdesk-council-v1",
+        "YIGDESK_MEMORY_REVISION": "task-context"
+      }
+    }
+  }
+}

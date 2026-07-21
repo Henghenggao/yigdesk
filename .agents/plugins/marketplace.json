@@ -1,0 +1,20 @@
+{
+  "name": "yigdesk-local",
+  "interface": {
+    "displayName": "Yigdesk local plugins"
+  },
+  "plugins": [
+    {
+      "name": "yigdesk",
+      "source": {
+        "source": "local",
+        "path": "./plugins/yigdesk"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

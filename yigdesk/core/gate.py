@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
+import json
 from .model import Decision, DecisionRecord
 
 @dataclass(frozen=True)
@@ -16,6 +17,16 @@ def _approvals_met(d: Decision) -> bool:
 def _eligible(d: Decision):
     return [c for c in d.candidates.values()
             if c.consequence is not None and c.consequence.verdict == "ok"]
+
+def _agent_identities(d: Decision) -> list[dict[str, str]]:
+    values = [d.owner_identity, d.cutoff_identity]
+    values.extend(candidate.agent_identity for candidate in d.candidates.values())
+    values.extend(claim.agent_identity for claim in d.claims.values())
+    unique = {
+        json.dumps(value, sort_keys=True, separators=(",", ":")): value
+        for value in values if value is not None
+    }
+    return [unique[key] for key in sorted(unique)]
 
 def resolve(d: Decision, evaluator_revision: str, seq: int = 0):
     """Deterministic close: no LLM, pure function of (candidates, approvals, policy, revision)."""
@@ -47,4 +58,5 @@ def resolve(d: Decision, evaluator_revision: str, seq: int = 0):
         decision_id=d.id, chosen_candidate_id=chosen_id, closed_by=closed_by,
         rationale=f"selector={selector}", evidence_refs=chosen.consequence.evidence_refs,
         approvals=[a.__dict__ for a in d.approvals], evaluator_revision=evaluator_revision,
-        source_fingerprint=chosen.consequence.fingerprint, seq=seq)
+        source_fingerprint=chosen.consequence.fingerprint, seq=seq,
+        cutoff_seq=d.cutoff_seq, agent_identities=_agent_identities(d))

@@ -35,6 +35,26 @@ async function capture(viewport, out, mode) {
   await page.close();
 }
 
+async function captureCommitted(viewport, out) {
+  seed();
+  const page = await browser.newPage({ viewport, deviceScaleFactor: 1 });
+  await page.goto(baseURL);
+  await page.getByTestId('decision-view').waitFor();
+  await page.getByTestId('approve-candidate').click();
+  await page.locator('[data-testid="proof-gate"][data-proof-status="ready"]').waitFor();
+  execFileSync(python, [
+    '-m', 'yigdesk.continuation', '--scenario', scenario, '--ledger', ledger,
+    '--decision-id', 'd1', '--after-seq', '0', '--timeout', '2',
+  ], { stdio: 'inherit' });
+  await page.getByTestId('refresh').click();
+  await page.locator('[data-testid="proof-gate"][data-proof-status="committed"]').waitFor();
+  await page.waitForTimeout(500);
+  await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+  await page.screenshot({ path: out, fullPage: true });
+  await page.close();
+}
+
 await capture({ width: 1440, height: 1120 }, 'docs/images/yigdesk-board.png');
 await capture({ width: 390, height: 844 }, 'docs/images/yigdesk-board-mobile.png');
+await captureCommitted({ width: 1440, height: 1120 }, 'docs/images/yigdesk-board-committed.png');
 await browser.close();

@@ -1,187 +1,121 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
-
-// The board web surface renders a deterministic ledger projection and lets a
-// human drive the two gate ops. The agent/MCP side normally seeds the ledger;
-// here `scripts/seed_board.py` plays that role against the SAME shared ledger the
-// app reads (YIGDESK_SCENARIO + YIGDESK_LEDGER, resolved fresh on every request),
-// so re-seeding between specs deterministically swaps the board state.
-//
-// The harness (scripts/run_e2e.mjs) launches the app once with these env vars and
-// forwards them to this process; the defaults keep a direct `playwright test`
-// (webServer path) working too. Playwright runs single-worker (playwright.config
-// workers:1) and this file is serial, so the shared ledger is never contended.
 
 const ROOT = process.cwd();
 const PYTHON = process.env.YIGDESK_PYTHON || 'python';
 const SCENARIO = process.env.YIGDESK_SCENARIO || path.resolve(ROOT, 'data/scenarios/council_discount');
 const LEDGER = process.env.YIGDESK_LEDGER || path.resolve(ROOT, 'runtime/e2e-board.jsonl');
 
-type SeedMode = 'single' | 'multi' | 'empty' | 'human';
-
-function seedBoard(mode: SeedMode): void {
-  const args = ['-m', 'scripts.seed_board', '--scenario', SCENARIO, '--ledger', LEDGER];
-  if (mode === 'multi') args.push('--multi');
-  if (mode === 'empty') args.push('--empty');
-  if (mode === 'human') args.push('--human-selected');
-  execFileSync(PYTHON, args, { cwd: ROOT, stdio: 'inherit' });
+function seedBoard(): void {
+  execFileSync(PYTHON, ['-m', 'scripts.seed_board', '--scenario', SCENARIO, '--ledger', LEDGER], { cwd: ROOT, stdio: 'inherit' });
 }
 
 test.describe.configure({ mode: 'serial' });
 
-test('single decision auto-selects, prices its candidate, and drives the policy gate to a committed record', async ({ page }) => {
-  seedBoard('single');
+test('Northwind council moves from a fail-closed gate to a committed decision', async ({ page }) => {
+  seedBoard();
   await page.goto('/');
 
-  // Exactly one decision auto-selects: the decision view renders directly with no chooser.
-  await expect(page.getByTestId('board-root')).toBeVisible();
-  await expect(page.getByTestId('decision-chooser')).toHaveCount(0);
   const view = page.getByTestId('decision-view');
   await expect(view).toBeVisible();
-  await expect(view).toHaveAttribute('data-decision-id', 'd1');
-  await expect(view).toContainText('Approve the discount?'); // question
-  await expect(view).toContainText('council_discount');      // decision_type
-  await expect(view).toContainText('open');                  // status
+  await expect(page.getByTestId('executive-conclusion')).toContainText('Ready');
+  await expect(page.getByTestId('candidate-comparison')).toContainText('12%');
+  await expect(page.getByTestId('candidate-comparison')).toContainText('15%');
+  await expect(page.getByTestId('candidate-comparison')).toContainText('20%');
+  await expect(page.getByTestId('candidate-comparison')).toContainText('Gross margin');
+  await expect(page.getByTestId('candidate-comparison')).toContainText('Headroom');
+  await expect(page.getByTestId('candidate-comparison')).toContainText('Submitted request');
+  await expect(page.getByTestId('candidate-comparison')).toContainText('Sales alternative');
+  await expect(page.getByTestId('candidate-comparison')).toContainText('Risk boundary');
+  const boardBeforeApproval = await (await page.request.get('/api/board')).json();
+  expect(boardBeforeApproval.decisions.d1.candidates.submitted_request.author).toBe('agent:finance_analyst');
+  expect(boardBeforeApproval.decisions.d1.candidates.sales_submitted_assessment.author).toBe('agent:sales_advocate');
+  expect(boardBeforeApproval.decisions.d1.candidates.sales_alternative.author).toBe('agent:sales_advocate');
+  expect(boardBeforeApproval.decisions.d1.candidates.risk_boundary.author).toBe('agent:risk_challenger');
+  expect(boardBeforeApproval.decisions.d1.candidates.submitted_request.agent_identity.run_id).toBe('synthetic-preview-run');
+  expect(boardBeforeApproval.decisions.d1.candidates.sales_alternative.agent_identity.prompt_revision).toBe('sales_advocate-preview-v1');
+  expect(boardBeforeApproval.decisions.d1.claims['optimizer-advisory'].agent_identity.agent_id).toBe('decision_optimizer');
+  await expect(page.getByTestId('decision-proof')).toContainText('Different perspectives');
+  await expect(page.getByTestId('proof-source')).toContainText('4/4 proposals');
+  await expect(page.getByTestId('proof-source')).toContainText('3 distinct options');
+  await expect(page.getByTestId('proof-gate')).toContainText('Blocked');
+  await expect(page.getByTestId('proof-gate')).toContainText('required approval missing');
+  await expect(page.getByTestId('risk-boundary')).toContainText('boundary candidate');
+  await expect(page.getByTestId('risk-boundary')).toContainText('Deal Inputs!B4');
 
-  // The priced candidate carries the deterministic verdict, figures, and evidence refs.
-  const candidate = page.locator('[data-testid="candidate"][data-candidate-id="c1"]');
-  await expect(candidate).toBeVisible();
-  await expect(candidate).toHaveAttribute('data-verdict', 'ok');
-  await expect(candidate).toContainText('Net ARR');
-  await expect(candidate).toContainText('980.00');            // net_arr after discount=2
-  await expect(candidate).toContainText('Deal Inputs!B4');    // grounded evidence ref
+  const pending = await page.request.post('/api/board/op', { data: {
+    decision_id: 'd1', kind: 'request_resolve', payload: {},
+  }});
+  expect((await pending.json()).result.pending).toBe('required approval missing');
 
-  // The grounded risk claim is surfaced.
-  const claim = page.getByTestId('claim');
-  await expect(claim).toBeVisible();
-  await expect(claim).toContainText('risk');
-  await expect(claim).toContainText('cogs may rise');
-
-  // max:<metric> is decision-scoped: a policy winner + a single authorize control,
-  // and NO candidate-scoped approves (that is the human_selected shape).
-  await expect(page.getByTestId('gate-panel')).toBeVisible();
-  await expect(page.getByTestId('policy-winner')).toContainText('c1');
-  await expect(page.getByTestId('authorize-policy')).toBeVisible();
-  await expect(page.getByTestId('approve-candidate')).toHaveCount(0);
-
-  // The role choices come from the policy, but the demo boundary is labelled next
-  // to the control: picking a role is local attribution, not proof of identity.
-  const attribution = page.getByTestId('role-attribution-note');
-  await expect(attribution).toBeVisible();
-  await expect(attribution).toContainText('not an authenticated identity');
-
-  // Act as cfo and authorize the policy selection (decision-scoped approve).
-  await page.getByTestId('role-select').selectOption('cfo');
-  const approvalCommitted = page.waitForResponse(
-    (r) => r.url().includes('/api/board/op') && r.request().method() === 'POST',
-  );
-  await page.getByTestId('authorize-policy').click();
-  await approvalCommitted; // ensure the approval is on the ledger before resolving
-
-  // Resolve → deterministic committed record (policy picks max headroom = c1).
-  await page.getByTestId('resolve').click();
-  const outcome = page.getByTestId('resolve-outcome');
-  await expect(outcome).toBeVisible();
-  await expect(outcome).toContainText('c1');     // chosen_candidate_id
-  await expect(outcome).toContainText('policy'); // closed_by
-
-  // After a committed resolution the gate controls carry disabled...
-  await expect(page.getByTestId('resolve')).toBeDisabled();
-  await expect(page.getByTestId('authorize-policy')).toBeDisabled();
-
-  // ...and resolving again is idempotent: the SAME record still renders.
-  await page.getByTestId('resolve').click({ force: true });
-  await expect(outcome).toContainText('c1');
-  await expect(outcome).toContainText('policy');
-  await expect(page.getByTestId('resolve')).toBeDisabled();
-});
-
-test('multiple decisions require an explicit chooser selection before the gate appears', async ({ page }) => {
-  seedBoard('multi');
-  await page.goto('/');
-
-  // A chooser is offered and nothing is auto-selected.
-  await expect(page.getByTestId('decision-chooser')).toBeVisible();
-  await expect(page.getByTestId('decision-option')).toHaveCount(2);
-
-  // Until a decision is chosen there is no decision view and no gate actions.
-  await expect(page.getByTestId('decision-view')).toHaveCount(0);
-  await expect(page.getByTestId('gate-panel')).toHaveCount(0);
+  await expect(page.getByTestId('approve-candidate')).toHaveCount(1);
+  await expect(page.getByTestId('approve-candidate')).toHaveText('Approve submitted request (12%)');
   await expect(page.getByTestId('resolve')).toHaveCount(0);
-  await expect(page.getByTestId('authorize-policy')).toHaveCount(0);
+  await page.getByTestId('approve-candidate').click();
+  await expect(page.getByTestId('action-status')).toContainText('recorded');
+  await expect(page.getByTestId('executive-conclusion')).toContainText('approval recorded');
+  await expect(page.getByTestId('proof-human')).toContainText('approval recorded');
+  await expect(page.getByTestId('proof-gate')).toContainText('Ready');
 
-  // Choosing a decision reveals its view and gate.
-  await page.locator('[data-testid="decision-option"][data-decision-id="d2"]').click();
-  const view = page.getByTestId('decision-view');
-  await expect(view).toBeVisible();
-  await expect(view).toHaveAttribute('data-decision-id', 'd2');
-  await expect(view).toContainText('Approve the pilot expansion?');
-  await expect(page.getByTestId('gate-panel')).toBeVisible();
-});
+  const continuation = JSON.parse(execFileSync(PYTHON, [
+    '-m', 'yigdesk.continuation', '--scenario', SCENARIO, '--ledger', LEDGER,
+    '--decision-id', 'd1', '--after-seq', '0', '--timeout', '1',
+  ], { cwd: ROOT, encoding: 'utf8' }));
+  expect(continuation.status).toBe('resolved');
+  expect(continuation.record.chosen_candidate_id).toBe('submitted_request');
 
-test('a valid ?decision_id deep link selects that decision; an invalid one falls back to the chooser', async ({ page }) => {
-  seedBoard('multi');
-
-  // A valid deep link selects d2 on load even though two decisions are open —
-  // no chooser click — and its gate is immediately live.
-  await page.goto('/?decision_id=d2');
-  const view = page.getByTestId('decision-view');
-  await expect(view).toBeVisible();
-  await expect(view).toHaveAttribute('data-decision-id', 'd2');
-  await expect(view).toContainText('Approve the pilot expansion?');
-  await expect(page.getByTestId('decision-chooser')).toBeVisible();
-  await expect(page.locator('[data-testid="decision-option"][data-decision-id="d2"]'))
-    .toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByTestId('gate-panel')).toBeVisible();
-  await expect(page.getByTestId('authorize-policy')).toBeEnabled();
-  await expect(page.getByTestId('resolve')).toBeEnabled();
-
-  // The deep link is one-shot: an explicit later choice outranks it, and a fresh
-  // board fetch (the same render path a background poll takes) keeps that choice.
-  await page.locator('[data-testid="decision-option"][data-decision-id="d1"]').click();
-  await expect(view).toHaveAttribute('data-decision-id', 'd1');
   await page.getByTestId('refresh').click();
-  await expect(view).toHaveAttribute('data-decision-id', 'd1'); // never snaps back to d2
-
-  // An invalid deep link falls back to the multi-decision rule: explicit choice
-  // required, nothing selected, no gate actions.
-  await page.goto('/?decision_id=nope');
-  await expect(page.getByTestId('decision-chooser')).toBeVisible();
-  await expect(page.getByTestId('decision-option')).toHaveCount(2);
-  await expect(page.getByTestId('decision-view')).toHaveCount(0);
-  await expect(page.getByTestId('gate-panel')).toHaveCount(0);
-  await expect(page.getByTestId('resolve')).toHaveCount(0);
-  await expect(page.getByTestId('authorize-policy')).toHaveCount(0);
+  await expect(page.getByTestId('executive-conclusion')).toContainText('Resolved');
+  await expect(page.getByTestId('decision-proof')).toContainText('No agent committed this outcome');
+  await expect(page.getByTestId('proof-gate')).toContainText('Committed');
+  await expect(page.getByTestId('proof-record')).toContainText('Ledger sequence');
+  await expect(page.getByTestId('proof-record')).toContainText('Evaluator revision');
+  await expect(page.getByTestId('proof-record')).toContainText('Input cutoff');
+  const board = await page.request.get('/api/board');
+  const decision = (await board.json()).decisions.d1;
+  expect(decision.approvals).toHaveLength(1);
+  expect(decision.resolution.chosen_candidate_id).toBe('submitted_request');
+  expect(decision.resolution.agent_identities).toHaveLength(5);
+  await expect(page.getByTestId('proof-record')).toContainText('5 declared');
 });
 
-test('an empty ledger renders the empty-board state', async ({ page }) => {
-  seedBoard('empty');
+test('unsafe action input is rejected by the narrow bridge', async ({ page }) => {
+  seedBoard();
   await page.goto('/');
-
-  await expect(page.getByTestId('board-empty')).toBeVisible();
-  await expect(page.getByTestId('decision-view')).toHaveCount(0);
-  await expect(page.getByTestId('decision-chooser')).toHaveCount(0);
+  const response = await page.request.post('/api/agent-actions', { data: {
+    version: 'yigdesk-agent-action/v1', action_id: 'unsafe-1', correlation_id: 'unsafe-1',
+    decision_id: 'd1', action_type: 'resolve', human: { role: 'cfo' }, script: '<script>alert(1)</script>',
+  }});
+  expect(response.status()).toBe(400);
+  await expect(page.getByTestId('decision-view')).toBeVisible();
 });
 
-test('human-selected gate disables HOLD approval and renders the committed approval', async ({ page }) => {
-  seedBoard('human');
-  await page.goto('/');
+test('ChatGPT widget renders the trusted Northwind decision manifest', async ({ page }) => {
+  seedBoard();
+  const manifest = await (await page.request.get('/api/decision-view')).json();
+  const html = readFileSync(path.resolve(ROOT, 'yigdesk/static/chatgpt-widget.html'), 'utf8');
+  await page.setContent(html);
+  await page.evaluate((view) => {
+    window.postMessage({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/tool-result',
+      params: {
+        structuredContent: {
+          view,
+          stateVersion: 7,
+          event: { kind: 'read_board' },
+        },
+      },
+    }, '*');
+  }, manifest);
 
-  const eligible = page.locator('[data-testid="approve-candidate"][data-candidate-id="c1"]');
-  const onHold = page.locator('[data-testid="approve-candidate"][data-candidate-id="hold"]');
-  await expect(eligible).toBeEnabled();
-  await expect(onHold).toBeDisabled();
-
-  await page.getByTestId('role-select').selectOption('cfo');
-  await eligible.click();
-  const approval = page.getByTestId('approval');
-  await expect(approval).toContainText('cfo');
-  await expect(approval).toContainText('approve');
-  await expect(approval).toContainText('c1');
-
-  await page.getByTestId('resolve').click();
-  const outcome = page.getByTestId('resolve-outcome');
-  await expect(outcome).toContainText('c1');
-  await expect(outcome).toContainText('human');
+  await expect(page.locator('h1')).toHaveText('Approve the discount?');
+  await expect(page.getByText('Submitted request', { exact: true })).toBeVisible();
+  await expect(page.getByText('Sales alternative', { exact: true })).toBeVisible();
+  await expect(page.getByText('Risk boundary', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/4\/4 proposals.*3 distinct options/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Approve submitted request (12%)' })).toBeEnabled();
+  await expect(page.getByText('Live proof · #7')).toBeVisible();
 });

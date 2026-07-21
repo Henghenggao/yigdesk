@@ -10,7 +10,7 @@ description = "Prices the submitted discount as a grounded blackboard candidate.
 config_file = "agents/finance_analyst.toml"
 
 [agents.sales_advocate]
-description = "Proposes the submitted discount and one customer-friendly alternative as candidates."
+description = "Proposes one distinct customer-friendly alternative as a grounded candidate."
 config_file = "agents/sales_advocate.toml"
 
 [agents.risk_challenger]
@@ -18,7 +18,7 @@ description = "Proposes a boundary candidate and posts a grounded risk claim on 
 config_file = "agents/risk_challenger.toml"
 
 [agents.decision_optimizer]
-description = "Posts a non-binding advisory claim; the deterministic gate, not the optimizer, closes the decision."
+description = "Reads the completed specialist board and posts one non-binding grounded advisory claim."
 config_file = "agents/decision_optimizer.toml"
 
 [mcp_servers.yigdesk]
@@ -27,4 +27,5 @@ args = ["-m", "yigdesk.blackboard_mcp"]
 required = true
 startup_timeout_sec = 15
 tool_timeout_sec = 30
-env_vars = ["YIGDESK_SCENARIO", "YIGDESK_LEDGER"]
+env_vars = ["YIGDESK_SCENARIO", "YIGDESK_LEDGER", "YIGDESK_AGENT_RUN_ID"]
+env = { YIGDESK_AGENT_ID = "orchestrator", YIGDESK_AGENT_PROFILE = "orchestrator", YIGDESK_AGENT_MODEL = "codex-runtime", YIGDESK_PROMPT_REVISION = "project-agents-v1", YIGDESK_SKILLS_REVISION = "yigdesk-council-v1", YIGDESK_MEMORY_REVISION = "task-context" }

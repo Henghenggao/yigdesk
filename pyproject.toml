@@ -1,3 +1,35 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yigdesk"
+version = "0.2.0"
+description = "Deterministic decision blackboard for Codex agents and humans"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "Flask==3.1.3",
+    "jsonschema==4.26.0",
+    "mcp>=1.27,<2",
+    "openpyxl==3.1.5",
+    "pydantic>=2.11,<3",
+]
+
+[project.scripts]
+yigdesk-mcp = "yigdesk.blackboard_mcp:main"
+yigdesk-chatgpt-app = "yigdesk.blackboard_mcp:http_main"
+yigdesk-web = "yigdesk.app:main"
+yigdesk-watch = "yigdesk.continuation:main"
+yigdesk-council-frontend = "scripts.council_frontend:main"
+
+[tool.setuptools.packages.find]
+include = ["yigdesk*", "scripts*"]
+
+[tool.setuptools.package-data]
+yigdesk = ["static/*", "schemas/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
