@@ -12,7 +12,9 @@ from typing import Any
 from flask import Flask, jsonify, request
 from werkzeug.exceptions import RequestEntityTooLarge
 
-from .board import board_dict, build_blackboard_from_env
+from .board import board_dict, build_blackboard, build_blackboard_from_env
+from .action_bridge import ActionError, LocalContinuationAdapter, execute_action, parse_action
+from .decision_manifest import build_manifest
 from .core.gate import Pending
 from .importer import (
     MAX_UPLOAD_BYTES,
@@ -130,6 +132,9 @@ def create_app(
     *,
     runtime_dir: Path | None = None,
     scenarios: dict[str, dict[str, Any]] | None = None,
+    scenario_dir: Path | None = None,
+    ledger_path: Path | None = None,
+    instance_id: str | None = None,
 ) -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="")
     app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + (64 * 1024)
@@ -183,7 +188,17 @@ def create_app(
 
     @app.get("/api/health")
     def health():
-        return jsonify({"status": "ok", "mode": "public-preview"})
+        payload = {
+            "status": "ok",
+            "mode": "public-preview",
+        }
+        if instance_id is not None:
+            payload["instance_id"] = instance_id
+        if scenario_dir is not None:
+            payload["scenario"] = str(Path(scenario_dir).resolve())
+        if ledger_path is not None:
+            payload["ledger"] = str(Path(ledger_path).resolve())
+        return jsonify(payload)
 
     @app.get("/api/state")
     def get_state():
@@ -257,6 +272,8 @@ def create_app(
 
     def _board_or_503():
         try:
+            if scenario_dir is not None:
+                return build_blackboard(scenario_dir, ledger_path), None
             return build_blackboard_from_env(require_scenario=True), None
         except (KeyError, FileNotFoundError):
             return None, (jsonify({"code": "BOARD_NOT_CONFIGURED",
@@ -268,6 +285,40 @@ def create_app(
         if err:
             return err
         return jsonify(board_dict(bb.project()))
+
+    @app.get("/api/decision-view")
+    def get_decision_view():
+        """The trusted, versioned data contract consumed by the browser renderer."""
+        bb, err = _board_or_503()
+        if err:
+            return err
+        return jsonify(build_manifest(
+            board_dict(bb.project()), evaluator_revision=bb.ev.revision
+        ))
+
+    @app.post("/api/agent-actions")
+    def agent_actions():
+        """Narrow browser bridge: typed intent -> existing approval/resolve ops only."""
+        try:
+            action = parse_action(request.get_json(silent=True))
+        except ActionError as error:
+            return jsonify({"code": "INVALID_AGENT_ACTION", "error": str(error)}), 400
+        bb, err = _board_or_503()
+        if err:
+            return err
+        with state.lock:
+            try:
+                response = execute_action(bb, action, LocalContinuationAdapter())
+            except (ActionError, ValueError, KeyError) as error:
+                message = str(error)
+                if "action_id was already used" in message:
+                    code, status = "IDEMPOTENCY_CONFLICT", 409
+                elif "human action already recorded" in message:
+                    code, status = "ACTION_CONFLICT", 409
+                else:
+                    code, status = "ACTION_REJECTED", 400
+                return jsonify({"code": code, "error": str(error)}), status
+            return jsonify(response)
 
     @app.post("/api/board/op")
     def board_op():

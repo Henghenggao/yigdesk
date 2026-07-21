@@ -1,12 +1,80 @@
 # Yigdesk
 
-**A deterministic decision blackboard for AI subagents and humans.**
+**Different agents. One measurable truth.**
+
+Yigdesk is a Codex-native decision workbench where Finance, Sales, and Risk can
+reason differently without creating different numerical realities. Each
+specialist proposes a structured candidate or grounded claim; the same
+deterministic engine prices every option; a human records the contextual intent;
+and a deterministic gate — never a language model — commits the final decision.
+
+![The Yigdesk Northwind decision workbench comparing three grounded discount candidates](docs/images/yigdesk-board.png)
+
+## OpenAI Build Week 2026
+
+- **Track:** Work & Productivity
+- **Audience:** cross-functional finance, commercial, operations, and approval teams
+
+The Northwind acceptance journey turns one discount request into a real Codex
+workflow:
+
+1. A Codex orchestrator opens one decision on the six-operation MCP blackboard.
+2. GPT-5.6 Finance, Sales, and Risk specialists run in parallel with different
+   role instructions and allow-listed tools. Sales independently reprices the
+   submitted request before adding its alternative.
+3. The shared engine prices the 12%, 15%, and 20% options from the same
+   generated-synthetic source; duplicate submitted-request analysis remains in
+   the ledger but appears as one executive comparison row.
+4. A read-and-claim-only optimizer mirrors the deterministic selector and posts
+   one grounded, non-binding advisory after the specialists finish.
+5. The browser renders a versioned declarative decision manifest — never
+   agent-authored HTML or JavaScript.
+6. A human approves, holds, or requests revision through a typed, idempotent
+   action envelope.
+7. A ledger watcher resumes the active Codex workflow. Only the existing
+   deterministic `request_resolve` gate can commit the `DecisionRecord`.
+
+The strongest proof is the failure path: before approval, resolution returns
+`pending("required approval missing")`; after the durable browser approval, the
+same gate commits exactly one record. `npm run test:e2e` runs that complete
+journey in a real browser, including unsafe-action rejection.
+
+### Decision Proof — the visible technical core
+
+The `yigdesk-decision-view/v3` surface makes the trust boundary legible as one
+four-stage proof: **Shared source → Grounded evidence → Human authority →
+Deterministic gate**. It moves from blocked, to ready, to a committed
+`DecisionRecord` while exposing the source fingerprint, evaluator revision, and
+ledger sequence. It also exposes the frozen input cutoff and the count of
+identity-bound agent contributors. Writes that land after cutoff are visibly
+audited and excluded. The aha moment is concrete: **no agent committed the outcome;
+the deterministic gate did.**
+
+![Decision Proof after the deterministic gate commits the selected candidate](docs/images/yigdesk-board-committed.png)
+
+### What was extended during Build Week
+
+| Existing foundation | Build Week extension |
+| --- | --- |
+| Append-only deterministic blackboard | Real Codex council with three parallel specialists and one bounded optimizer |
+| Six MCP operations | Fast-path plugin and live, identity-bound frontend launcher |
+| Deterministic pricing and resolution | Adaptive allow-listed manifest, focused renderer, and Decision Proof |
+| Human approval operation | Typed AgentAction bridge with durable idempotency |
+| Local board polling | Honest ledger-backed Codex continuation adapter |
+| Backend conformance tests | Full Northwind browser journey from fail-closed to committed record |
+
+This public submission intentionally uses one owner coordinating subagents. It
+does **not** claim multi-tenant identity, a private native Codex callback,
+production connectors, workbook write-back, or arbitrary Excel compatibility.
+Those are future integration boundaries, not simulated capabilities.
+
+## How it works
 
 Yigdesk is a standalone service where autonomous agents and human reviewers
 decide *together* on a shared, append-only board. Agents propose candidate
 actions and post grounded claims; a pluggable evaluator prices every candidate
-from real source data; humans (or a policy) approve; and a deterministic gate —
-never a language model — closes the decision and commits an auditable record.
+from source data; humans (or a policy) approve; and a deterministic gate closes
+the decision and commits an auditable record.
 
 The whole system is three small parts:
 
@@ -74,14 +142,15 @@ the source cells. Three ship in `data/scenarios/`:
 - **`council_discount`** — the flagship multi-agent app. Same discount question,
   but the policy additionally requires a **grounded `risk` claim** before the gate
   will resolve. Four Codex personas (`.codex/agents/`) work the board over the six
-  ops, coordinated by the `yigdesk-council` skill (`.agents/skills/`):
+  ops in two stages, coordinated by the `yigdesk-council` skill (`.agents/skills/`):
   - `finance_analyst` — prices the submitted discount as a candidate;
-  - `sales_advocate` — prices the submitted discount and one customer-friendly alternative;
+  - `sales_advocate` — independently prices the submitted discount and one distinct customer-friendly alternative;
   - `risk_challenger` — prices a boundary candidate and posts a grounded `risk` claim on the COGS cell;
-  - `decision_optimizer` — reads the board and posts a *non-binding* advisory claim (it never resolves).
+  - `decision_optimizer` — reads the completed specialist board and posts one grounded, non-binding advisory claim.
 
-The personas only read, propose, and claim. The orchestrator (or human) casts the
-approval and calls `request_resolve`; the deterministic gate closes the decision.
+The optimizer cannot propose, approve, or resolve. The orchestrator (or human)
+casts the approval and calls `request_resolve`; the deterministic gate closes the
+decision.
 
 ## Quickstart
 
@@ -90,10 +159,26 @@ tests). Everything is local and synthetic; no external credential is needed to r
 the blackboard, the evaluator, or the web board.
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -e .
 python scripts/build_scenarios.py        # materialize each scenario's workbook
 python -m pytest                          # run the full test suite
 ```
+
+### 60-second judge preview
+
+Seed the same three-option, four-agent synthetic decision used by the browser test,
+then open <http://127.0.0.1:8787>.
+
+```powershell
+python -m scripts.seed_board --scenario data/scenarios/council_discount --ledger runtime/judge-board.jsonl
+$env:YIGDESK_SCENARIO="data/scenarios/council_discount"
+$env:YIGDESK_LEDGER="runtime/judge-board.jsonl"
+python -m yigdesk.app
+```
+
+On macOS/Linux, set the two environment variables inline before
+`python -m yigdesk.app`. To verify the entire failure-to-commit journey rather
+than only viewing the seeded surface, run `npm run test:e2e`.
 
 Run the **MCP server** so an agent client (or MCP Inspector) can call the six ops.
 It reads `YIGDESK_SCENARIO` (the scenario directory to price against, default
@@ -103,6 +188,35 @@ and `YIGDESK_LEDGER` (the append-only board ledger, default `runtime/board.jsonl
 ```bash
 YIGDESK_SCENARIO=data/scenarios/discount_approval python -m yigdesk.blackboard_mcp
 ```
+
+### ChatGPT App (Developer Mode)
+
+The same Python MCP server now exposes a versioned MCP App component without
+adding a seventh tool. `read_board` opens the focused decision workbench;
+component actions call `cast_approval` with durable idempotency metadata; only
+`request_resolve` can commit the `DecisionRecord`. Start the Streamable HTTP
+endpoint on a separate port:
+
+```powershell
+$env:YIGDESK_SCENARIO="data/scenarios/council_discount"
+$env:YIGDESK_LEDGER="runtime/chatgpt-board.jsonl"
+$env:YIGDESK_MCP_HOST="0.0.0.0"
+$env:YIGDESK_MCP_PORT="8788"
+python -m yigdesk.blackboard_mcp --transport streamable-http
+```
+
+The app endpoint is `http://127.0.0.1:8788/mcp`. Inspect it locally with the
+[MCP Inspector](https://developers.openai.com/apps-sdk/deploy/testing/), then
+expose port `8788` through an HTTPS development tunnel. In ChatGPT, enable
+Developer Mode under **Settings → Apps & Connectors → Advanced settings**, create
+an app with `https://<your-tunnel-host>/mcp`, and refresh the app whenever tool or
+resource metadata changes. The official connection flow is documented in
+[Connect from ChatGPT](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt/).
+
+This repository deliberately remains a synthetic, unauthenticated Developer
+Mode demo. The selected CFO/reviewer role is recorded attribution, not verified
+identity; production or multi-tenant use requires an external OAuth and tenant
+adapter rather than weakening the six-op blackboard boundary.
 
 Bind a synthetic upload into an **immutable session** (the offline intake path;
 generate a sample first with `python -m scripts.generate_sample_workbook`):
@@ -118,12 +232,42 @@ future integration.
 
 Serve the **web board + human gate** on <http://127.0.0.1:8787>. It reads the
 same scenario and ledger as the MCP server, renders candidates, grounded claims,
-approvals, and committed records, and lets a human cast approvals and request
-resolution:
+approvals, and committed records. The policy-aware gate shows one approval for a
+`max:headroom` outcome; a Codex task can then observe that durable action and call
+the deterministic resolver:
 
 ```bash
 YIGDESK_SCENARIO=data/scenarios/council_discount YIGDESK_LEDGER=runtime/board.jsonl python -m yigdesk.app
 ```
+
+For the fast Codex council, start an identity-bound unseeded frontend. The
+launcher requires both `/api/health` and `/api/board` to return HTTP 200 within
+10 seconds and writes an atomic ready receipt:
+
+```bash
+python -m scripts.council_frontend --decision-id northwind-demo \
+  --ready-file runtime/council-frontends/northwind-demo.json
+```
+
+While the same Codex task remains active, its ledger watcher resumes after the
+human button action. Approval runs the existing deterministic gate; Hold is
+terminal. Request revision keeps the input window open and re-enables human
+actions only after a new priced candidate reaches the ledger:
+
+```bash
+python -m yigdesk.continuation --scenario data/scenarios/council_discount \
+  --ledger runtime/board.jsonl --decision-id northwind-demo --after-seq 0 --timeout 60
+```
+
+### Codex plugin
+
+The repository ships a Codex plugin at `plugins/yigdesk` plus a repo marketplace
+at `.agents/plugins/marketplace.json`. The plugin bundles the fast council skill
+and the same six-operation local MCP server; it does not depend on a private Codex
+callback or add a seventh operation. After cloning and installing the Python
+package, add the repo marketplace and install `yigdesk@yigdesk-local` with the
+Codex plugin commands available in your Codex version. Start a new Codex task so
+the newly installed skill and MCP server are loaded.
 
 ## Benchmark: bare agent vs. blackboard
 
@@ -145,8 +289,9 @@ token usage, source fingerprint, and tool names — never the raw case content.
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md) — the five units, the op/data model, and D1–D4.
-- [Design system](docs/DESIGN_SYSTEM.md) — the Evidence Ledger visual language for the web board.
+- [Product and architecture specification](docs/YIGDESK_SPEC.md) — product thesis,
+  deterministic guarantees and limits, Codex A2A, multi-tenant target, security,
+  design system, feasibility, and value-ranked roadmap.
 
 ## License and rights
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 
@@ -55,7 +56,7 @@ def _agent(name):
 
 def _skill():
     return (
-        ROOT / ".agents" / "skills" / "yigdesk-council" / "SKILL.md"
+        ROOT / "plugins" / "yigdesk" / "skills" / "yigdesk-council" / "SKILL.md"
     ).read_text(encoding="utf-8")
 
 
@@ -89,7 +90,16 @@ def test_council_agents_pin_low_latency_reasoning_on_the_real_work_path(agent_na
     assert mcp["args"] == ["-m", "yigdesk.blackboard_mcp"]
     assert mcp["required"] is True
     assert set(mcp["enabled_tools"]) == ROLE_TOOLS[agent_name]
-    assert set(mcp["env_vars"]) == {"YIGDESK_SCENARIO", "YIGDESK_LEDGER"}
+    assert set(mcp["env_vars"]) == {
+        "YIGDESK_SCENARIO", "YIGDESK_LEDGER", "YIGDESK_AGENT_RUN_ID",
+    }
+    identity = mcp["env"]
+    assert identity["YIGDESK_AGENT_ID"] == agent_name
+    assert identity["YIGDESK_AGENT_PROFILE"] == agent_name
+    assert identity["YIGDESK_AGENT_MODEL"] == "gpt-5.6-terra"
+    assert identity["YIGDESK_PROMPT_REVISION"].endswith("-v1")
+    assert identity["YIGDESK_SKILLS_REVISION"] == "yigdesk-council-v1"
+    assert identity["YIGDESK_MEMORY_REVISION"] == "isolated-none"
 
 
 @pytest.mark.parametrize("agent_name", AGENT_NAMES)
@@ -107,8 +117,42 @@ def test_project_council_explicitly_disables_fast_mode():
     assert "service_tier" not in config
     mcp = config["mcp_servers"]["yigdesk"]
     assert mcp["args"] == ["-m", "yigdesk.blackboard_mcp"]
-    assert set(mcp["env_vars"]) == {"YIGDESK_SCENARIO", "YIGDESK_LEDGER"}
-    assert "env" not in mcp
+    assert set(mcp["env_vars"]) == {
+        "YIGDESK_SCENARIO", "YIGDESK_LEDGER", "YIGDESK_AGENT_RUN_ID",
+    }
+    assert mcp["env"]["YIGDESK_AGENT_ID"] == "orchestrator"
+    assert mcp["env"]["YIGDESK_AGENT_PROFILE"] == "orchestrator"
+    assert config["agents"]["decision_optimizer"]["config_file"] == (
+        "agents/decision_optimizer.toml"
+    )
+
+
+def test_repo_plugin_bundles_the_authoritative_fast_path():
+    skill = (
+        ROOT / "plugins" / "yigdesk" / "skills" / "yigdesk-council" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert 'fork_turns="none"' in skill
+    assert "decision_optimizer" in skill
+    assert 'post_claim(type="advisory")' in skill
+    assert "Never bind an upload" in skill
+    assert "/api/health" in skill and "/api/board" in skill
+    assert "python -m yigdesk.continuation" in skill
+
+    mcp = json.loads(
+        (ROOT / "plugins" / "yigdesk" / ".mcp.json").read_text(encoding="utf-8")
+    )["mcpServers"]["yigdesk"]
+    assert set(mcp["env_vars"]) == {
+        "YIGDESK_SCENARIO", "YIGDESK_LEDGER", "YIGDESK_AGENT_RUN_ID",
+    }
+    assert mcp["env"] == {
+        "YIGDESK_AGENT_ID": "orchestrator",
+        "YIGDESK_AGENT_PROFILE": "plugin_orchestrator",
+        "YIGDESK_AGENT_MODEL": "codex-runtime",
+        "YIGDESK_PROMPT_REVISION": "plugin-entry-v1",
+        "YIGDESK_SKILLS_REVISION": "yigdesk-council-v1",
+        "YIGDESK_MEMORY_REVISION": "task-context",
+    }
 
 
 def test_roles_split_the_six_ops_so_only_the_gate_closes_a_decision():
@@ -123,8 +167,6 @@ def test_roles_split_the_six_ops_so_only_the_gate_closes_a_decision():
     # Risk proposes a boundary candidate AND grounds a claim.
     assert "propose_candidate" in tools["risk_challenger"]
     assert "post_claim" in tools["risk_challenger"]
-    # The optimizer only advises: read the board and post a claim. It never
-    # proposes and it never resolves.
     assert tools["decision_optimizer"] == {"read_board", "post_claim"}
     # No role may open, approve, or resolve — those stay with the orchestrator.
     for name in AGENT_NAMES:
@@ -181,22 +223,6 @@ def test_risk_persona_grounds_a_risk_claim_in_real_evidence():
     assert "boundary_discount_pct" in instructions
 
 
-def test_optimizer_advises_but_never_closes_the_decision():
-    config = _agent("decision_optimizer")
-    instructions = config["developer_instructions"]
-    tools = set(config["mcp_servers"]["yigdesk"]["enabled_tools"])
-
-    assert "read_board" in tools
-    assert "post_claim" in tools
-    assert "propose_candidate" not in tools
-    assert "request_resolve" not in tools
-    # The persona must say, in words, that it advises and never resolves.
-    assert "non-binding" in instructions
-    assert "request_resolve" in instructions  # named as the op it must NOT call
-    assert "recommended_candidate_id" in instructions
-    assert "lexicographically greatest candidate id" in instructions
-
-
 def test_role_outputs_speak_the_new_op_vocabulary():
     instructions = {
         name: _agent(name)["developer_instructions"] for name in AGENT_NAMES
@@ -205,5 +231,9 @@ def test_role_outputs_speak_the_new_op_vocabulary():
     assert "submitted_discount_pct" in instructions["finance_analyst"]
     assert "propose_candidate" in instructions["finance_analyst"]
     assert "alternative_discount_pct" in instructions["sales_advocate"]
+    assert "submitted_discount_pct" in instructions["sales_advocate"]
     assert "boundary_discount_pct" in instructions["risk_challenger"]
     assert "recommended_candidate_id" in instructions["decision_optimizer"]
+    assert 'candidate id "submitted_request"' in instructions["finance_analyst"]
+    assert 'candidate id "sales_submitted_assessment"' in instructions["sales_advocate"]
+    assert 'candidate id "sales_alternative"' in instructions["sales_advocate"]

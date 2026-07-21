@@ -48,6 +48,197 @@ def test_get_board_returns_policy_and_priced_candidate(client):
     assert d["candidates"]["c1"]["consequence"]["verdict"] == "ok"
     assert d["claims"]["k1"]["status"] == "grounded"
 
+
+def test_decision_view_is_a_versioned_safe_manifest(client):
+    view = client.get("/api/decision-view")
+    assert view.status_code == 200
+    manifest = view.get_json()
+    assert manifest["version"] == "yigdesk-decision-view/v3"
+    blocks = manifest["decisions"][0]["blocks"]
+    assert [block["type"] for block in blocks] == ["comparison", "proof", "evidence", "warning", "actions", "history"]
+    assert blocks[1]["record"]["evaluator_revision"].startswith("expr:v1:")
+    assert blocks[3]["refs"] == ["Deal Inputs!B4"]
+
+
+def test_agent_action_is_idempotent_and_uses_the_existing_approval_boundary(client, tmp_path):
+    action = {
+        "version": "yigdesk-agent-action/v1", "action_id": "approve-1", "correlation_id": "journey-1",
+        "decision_id": "d1", "action_type": "approve_candidate", "candidate_id": "c1", "human": {"role": "cfo"},
+    }
+    first = client.post("/api/agent-actions", json=action)
+    second = client.post("/api/agent-actions", json=action)
+    assert first.status_code == second.status_code == 200
+    assert first.get_json()["action_replayed"] is False
+    assert second.get_json()["action_replayed"] is True
+    assert len([op for op in Ledger(tmp_path / "board.jsonl").read() if op.kind == "cast_approval"]) == 1
+
+    resolved = client.post("/api/agent-actions", json={
+        "version": "yigdesk-agent-action/v1", "action_id": "resolve-1", "correlation_id": "journey-1",
+        "decision_id": "d1", "action_type": "resolve", "human": {"role": "cfo"},
+    }).get_json()
+    assert resolved["result"]["record"]["chosen_candidate_id"] == "c1"
+    replayed = client.post("/api/agent-actions", json={
+        "version": "yigdesk-agent-action/v1", "action_id": "resolve-1", "correlation_id": "journey-1",
+        "decision_id": "d1", "action_type": "resolve", "human": {"role": "cfo"},
+    }).get_json()
+    assert replayed["action_replayed"] is True
+    assert replayed["result"]["record"]["chosen_candidate_id"] == "c1"
+    resolve_receipts = [
+        op for op in Ledger(tmp_path / "board.jsonl").read()
+        if op.kind == "request_resolve" and op.payload.get("action_id") == "resolve-1"
+    ]
+    assert len(resolve_receipts) == 1
+    assert resolve_receipts[0].payload["action_outcome"] == "resolved"
+
+
+def test_resolve_action_pending_replay_and_conflict_are_ledger_idempotent(client, tmp_path):
+    action = {
+        "version": "yigdesk-agent-action/v1",
+        "action_id": "resolve-pending-1",
+        "correlation_id": "journey-pending-1",
+        "decision_id": "d1",
+        "action_type": "resolve",
+        "human": {"role": "cfo"},
+    }
+
+    first = client.post("/api/agent-actions", json=action)
+    replay = client.post("/api/agent-actions", json=action)
+    conflict = client.post(
+        "/api/agent-actions",
+        json={**action, "correlation_id": "another-journey"},
+    )
+
+    assert first.status_code == replay.status_code == 200
+    assert first.get_json()["result"] == {"pending": "required approval missing"}
+    assert replay.get_json()["result"] == {"pending": "required approval missing"}
+    assert first.get_json()["action_replayed"] is False
+    assert replay.get_json()["action_replayed"] is True
+    assert conflict.status_code == 409
+    receipts = [
+        op for op in Ledger(tmp_path / "board.jsonl").read()
+        if op.kind == "request_resolve" and op.payload.get("action_id")
+    ]
+    assert len(receipts) == 1
+    assert receipts[0].payload["pending_reason"] == "required approval missing"
+
+
+def test_agent_action_idempotency_survives_web_process_restart(client, tmp_path):
+    action = {
+        "version": "yigdesk-agent-action/v1",
+        "action_id": "approve-durable-1",
+        "correlation_id": "journey-durable-1",
+        "decision_id": "d1",
+        "action_type": "approve_candidate",
+        "candidate_id": "c1",
+        "human": {"role": "cfo", "note": "approved in browser"},
+    }
+
+    assert client.post("/api/agent-actions", json=action).get_json()["action_replayed"] is False
+    restarted_client = create_app(runtime_dir=tmp_path / "restarted-runtime").test_client()
+    replay = restarted_client.post("/api/agent-actions", json=action)
+
+    assert replay.status_code == 200
+    assert replay.get_json()["action_replayed"] is True
+    approval_ops = [
+        op for op in Ledger(tmp_path / "board.jsonl").read()
+        if op.kind == "cast_approval"
+    ]
+    assert len(approval_ops) == 1
+    assert approval_ops[0].payload["action_id"] == "approve-durable-1"
+    assert approval_ops[0].payload["note"] == "approved in browser"
+
+
+def test_approval_replay_stays_successful_after_watcher_resolves(client, tmp_path):
+    action = {
+        "version": "yigdesk-agent-action/v1",
+        "action_id": "approve-before-resolve",
+        "correlation_id": "journey-before-resolve",
+        "decision_id": "d1",
+        "action_type": "approve_candidate",
+        "candidate_id": "c1",
+        "human": {"role": "cfo"},
+    }
+    assert client.post("/api/agent-actions", json=action).status_code == 200
+    bb = build_blackboard(tmp_path / "scn", tmp_path / "board.jsonl")
+    assert not hasattr(bb.request_resolve("d1", actor="orchestrator", role="owner"), "reason")
+
+    replay = create_app(runtime_dir=tmp_path / "after-resolve").test_client().post(
+        "/api/agent-actions", json=action
+    )
+
+    assert replay.status_code == 200
+    assert replay.get_json()["action_replayed"] is True
+
+
+def test_agent_action_rejects_unsafe_payload_and_bad_approval_scope(client):
+    unsafe = client.post("/api/agent-actions", json={
+        "version": "yigdesk-agent-action/v1", "action_id": "bad-1", "correlation_id": "bad-1",
+        "decision_id": "d1", "action_type": "resolve", "human": {"role": "cfo"}, "script": "<script>",
+    })
+    assert unsafe.status_code == 400
+    rejected = client.post("/api/agent-actions", json={
+        "version": "yigdesk-agent-action/v1", "action_id": "bad-2", "correlation_id": "bad-2",
+        "decision_id": "d1", "action_type": "approve_candidate", "candidate_id": "unknown", "human": {"role": "cfo"},
+    })
+    assert rejected.status_code == 400
+    conflicting_verdict = client.post("/api/agent-actions", json={
+        "version": "yigdesk-agent-action/v1", "action_id": "bad-3", "correlation_id": "bad-3",
+        "decision_id": "d1", "action_type": "hold", "human": {"role": "cfo", "verdict": "approve"},
+    })
+    assert conflicting_verdict.status_code == 400
+    wrong_role = client.post("/api/agent-actions", json={
+        "version": "yigdesk-agent-action/v1", "action_id": "bad-4", "correlation_id": "bad-4",
+        "decision_id": "d1", "action_type": "approve_candidate", "candidate_id": "c1",
+        "human": {"role": "intern"},
+    })
+    assert wrong_role.status_code == 400
+    assert wrong_role.get_json()["error"] == "human role must be one of ['cfo']"
+
+
+def test_first_human_intent_is_terminal_for_the_decision(client, tmp_path):
+    held = client.post("/api/agent-actions", json={
+        "version": "yigdesk-agent-action/v1",
+        "action_id": "hold-first",
+        "correlation_id": "journey-terminal",
+        "decision_id": "d1",
+        "action_type": "hold",
+        "human": {"role": "cfo", "note": "Need revised unit economics"},
+    })
+    conflicting = client.post("/api/agent-actions", json={
+        "version": "yigdesk-agent-action/v1",
+        "action_id": "approve-after-hold",
+        "correlation_id": "journey-terminal",
+        "decision_id": "d1",
+        "action_type": "approve_candidate",
+        "candidate_id": "c1",
+        "human": {"role": "cfo"},
+    })
+
+    assert held.status_code == 200
+    assert conflicting.status_code == 409
+    assert conflicting.get_json()["code"] == "ACTION_CONFLICT"
+    action_ops = [
+        op for op in Ledger(tmp_path / "board.jsonl").read()
+        if op.kind == "cast_approval" and op.payload.get("action_id")
+    ]
+    assert [op.payload["action_id"] for op in action_ops] == ["hold-first"]
+
+
+def test_action_id_replay_requires_the_entire_request_to_match(client, tmp_path):
+    bb = build_blackboard(tmp_path / "scn", tmp_path / "board.jsonl")
+    bb.cast_action_approval(
+        "d1", "hold", "d1", actor="human:web", role="cfo",
+        action_id="same-id", correlation_id="same-correlation",
+        action_type="hold", note="Wait for revised terms",
+    )
+
+    with pytest.raises(ValueError, match="action_id was already used with another request"):
+        bb.cast_action_approval(
+            "d1", "approve", "d1", actor="human:web", role="cfo",
+            action_id="same-id", correlation_id="same-correlation",
+            action_type="approve_candidate", candidate_id="c1",
+        )
+
 def test_get_board_omits_rejected_claims(client, tmp_path):
     """Spec §7: `GET /api/board` "omits rejected claims".
 
